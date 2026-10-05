@@ -94,6 +94,16 @@ def main():
         assert restored["signals"][0]["completed"] == ["stage:0"]
         assert restored["signals"][0]["tp"] == restored["signals"][0]["targets"][-1]["price"]
         assert restored["settings"]["channel_id"] == -1001002
+        # Exercise the omitted-instrument format from the user's actual channel.
+        request("demo_price", price=4160)
+        wait_for(lambda s:all(t["state"] != "open" for t in s["signals"]))
+        request("demo_signal", text="كرر شراء الان من 60\n\nستوب 59.5")
+        final = wait_for(lambda s:any(t["state"] == "open" and t["entry"] == 4160 for t in s["signals"]))
+        latest = next(t for t in final["signals"] if t["state"] == "open")
+        assert latest["sl"] == 4159.5
+        request("demo_signal", text="متاحه مجددا 🔥", reply=latest["message"])
+        final = wait_for(lambda s:any("لم يتم التكرار" in e["message"] for e in s["events"]))
+        assert sum(t["state"] == "open" for t in final["signals"]) == 1
         request("stop")
         process.wait(timeout=10)
         print("Service smoke passed: version, channel switch/confirmation/persistence, startup, IPC, execution, partial close, breakeven, UI detach, restart.")

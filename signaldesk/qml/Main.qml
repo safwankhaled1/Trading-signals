@@ -440,7 +440,7 @@ ApplicationWindow {
                             Toggle { label:"متابعة تعديلات رسائل الإشارة"; settingKey:"follow_edits" }
                             Choice { label:"الصفقات التي يديرها التطبيق"; settingKey:"management_scope"; labels:["صفقات التطبيق فقط", "مع صفقات يدوية محددة", "كل صفقات الرمز المختار"]; values:["app","selected","all"] }
                             Input { visible:root.cfg.management_scope === "selected"; Layout.fillWidth:true; placeholderText:"أرقام الصفقات اليدوية مفصولة بفاصلة"; text:root.cfg.selected_tickets.join(", "); onTextEdited:root.setCfg("selected_tickets",text.split(",").filter(x=>x.trim()).map(x=>Number(x.trim()))) }
-                            Toggle { label:"تطبيق أهداف وتأمين التطبيق على الصفقات اليدوية (وإعداد ستوب ثابت عند تبنّيها)"; settingKey:"manage_manual_stops" }
+                            Toggle { label:"إدارة الصفقات اليدوية الجديدة والمفتوحة حسب إعدادات الستوب والأهداف والتأمين"; settingKey:"manage_manual_stops" }
                         }
                     }
                     Card { Layout.fillWidth:true; implicitHeight: timezoneSettings.implicitHeight+40

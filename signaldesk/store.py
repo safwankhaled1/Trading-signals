@@ -109,6 +109,9 @@ class Store:
         row = self.db.execute("SELECT * FROM messages WHERE account=? AND channel=? AND message=?", (self.account or "", channel, message)).fetchone()
         return dict(row) if row else None
 
+    def latest_messages(self, channel, limit=20):
+        return [dict(row) for row in self.db.execute("SELECT * FROM messages WHERE account=? AND channel=? ORDER BY received DESC,message DESC LIMIT ?", (self.account or "", channel, limit))]
+
     def save_message(self, channel, message, text, reply, signal, received, edited=False):
         with self.db:
             if edited:

@@ -69,8 +69,12 @@ def main():
                 raise RuntimeError("Unable to verify the current worker state")
             snapshot = connection.recv()
             active = [s for s in snapshot.get("signals", []) if s["state"] in {"open", "pending", "sending", "uncertain"}]
-            # Demo positions have no broker exposure and are restored from their saved state.
-            if active and mode != "demo":
+            # Read-only manual monitoring has no active broker management to interrupt.
+            managed = [s for s in active if not (s.get("manual") and s["state"] == "open"
+                       and not s.get("config", {}).get("manage_manual_stops")
+                       and not snapshot.get("settings", {}).get("manage_manual_stops"))]
+            # Demo positions are restored from their saved state and have no broker exposure.
+            if managed and mode != "demo":
                 raise RuntimeError("Worker has active signals or trades; stop it from the application before updating")
         # Keep the previous files recoverable before closing any process.
         if not backup.exists():

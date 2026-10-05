@@ -51,7 +51,8 @@ def test_channel_now_price_formats(text, kind, side):
 
 @pytest.mark.parametrize("text", ["شراء ذهب الآن ستوب 63.5", "شراء ذهب الآن\nالأرباح 64 بيب"])
 def test_now_without_entry_never_uses_stop_or_report_number(text):
-    assert parse_message(text).kind == "ignored"
+    assert parse_message(text).kind in {"ignored", "ambiguous"}
+    assert parse_message(text).entry is None
 
 
 def test_exact_channel_repeat_executes_once_and_reenters_only_after_new_message(desk):

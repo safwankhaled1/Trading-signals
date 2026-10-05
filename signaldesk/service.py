@@ -63,7 +63,7 @@ class Service:
         if not self.engine or not self.deferred:
             return
         try:
-            self.broker.tick()
+            tick = self.broker.tick()
         except BrokerError:
             return
         for _ in range(min(10, len(self.deferred))):
@@ -72,7 +72,7 @@ class Service:
             if not edited and cfg.expiry_enabled and time.time() >= received + cfg.wait_minutes * 60:
                 self.store.event("انتهت مهلة رسالة منتظرة أثناء انقطاع MT5", level="warning", message_id=mid)
             else:
-                self.engine.receive(channel, mid, raw, reply, edited, received, name)
+                self.engine.receive(channel, mid, raw, reply, edited, received, name, tick=tick)
             self.deferred.pop(0)
             self.store.set("inbox", self.deferred)
 
@@ -415,10 +415,10 @@ class Service:
                     self.notice = str(exc)
                     self.notice_id += 1
                 self.report_future = None
-            if time.time() - last_snapshot >= .7:
+            if time.time() - last_snapshot >= .25:
                 self.snapshot()
                 last_snapshot = time.time()
-            await asyncio.sleep(.15)
+            await asyncio.sleep(.03)
         await self.gateway.disconnect()
         for task in tasks:
             task.cancel()

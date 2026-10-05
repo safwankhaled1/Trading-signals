@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from dataclasses import replace
 from copy import deepcopy
 
 from .broker import AccountChanged, BrokerError, UncertainExecution, quantize_volume, valid_stop, symbol_instrument
@@ -28,6 +29,7 @@ class TradingEngine:
         self.last_history = 0
         self.last_error = ""
         self.needs_reconcile = False
+        self.history_cursor = 0
 
     def settings_for(self, channel):
         profile = self.store.get(f"profile:{channel}")
@@ -48,7 +50,7 @@ class TradingEngine:
         candidates = [s for s in self.current_signals() if s["channel"] == channel and not s.get("manual")]
         return max(candidates, key=lambda s: (s["created"], s.get("sequence", 0)), default=None)
 
-    def receive(self, channel, message_id, raw, reply=None, edited=False, received=None, channel_name=""):
+    def receive(self, channel, message_id, raw, reply=None, edited=False, received=None, channel_name="", tick=None):
         now = self.clock() if received is None else received
         old = self.store.message(channel, message_id)
         if old and not edited:
@@ -58,9 +60,25 @@ class TradingEngine:
         if reference and reference not in self.current_signals():
             reference = None
         signal_id = reference["id"] if reference else ""
+        if parsed.kind == "repeat" and not parsed.entry and not edited:
+            # A fresh availability message refers to its original entry text, even if an
+            # older parser failed to understand that entry. Never replay the original post.
+            rows = [self.store.message(channel, reply)] if reply else self.store.latest_messages(channel)
+            for row in rows:
+                if not row:
+                    continue
+                source = parse_message(row["text"])
+                if source.kind in {"entry", "repeat"} and source.entry:
+                    parsed = replace(parsed, side=parsed.side or source.side, entry=source.entry,
+                                     stop=parsed.stop or source.stop, instrument=parsed.instrument or source.instrument)
+                    break
+        if parsed.kind == "ambiguous":
+            signal_id = ""
         self.store.save_message(channel, message_id, raw, reply, signal_id, now, edited)
         cfg = self.settings_for(channel)
         try:
+            if parsed.kind == "ambiguous":
+                raise BrokerError(parsed.reason)
             if parsed.instrument and parsed.instrument != symbol_instrument(self.broker.symbol, self.broker.info.get("description", "")):
                 raise BrokerError("الإشارة لرمز مختلف؛ لن تُنفّذ على الرمز المختار " + self.broker.symbol)
             if edited:
@@ -73,7 +91,15 @@ class TradingEngine:
                 self.store.event("رسالة غير تداولية؛ تم تجاهلها", signal_id, message_id=message_id)
                 return ""
             if parsed.kind in {"targets", "manage"}:
+                managed_manuals = [s for s in self.current_signals() if s.get("manual") and s["state"] == "open" and self._manual_enabled(s)]
+                if parsed.kind == "targets" and cfg.targets_mode == "channel":
+                    for manual in managed_manuals:
+                        manual["channel_targets"] = parsed.targets
+                        self._set_targets(manual, self.settings)
+                        self.save(manual)
                 if not reference:
+                    if managed_manuals and parsed.kind == "targets" and cfg.targets_mode == "channel":
+                        return ""
                     self.store.event("لم توجد إشارة مرتبطة بالتحديث", level="warning")
                     return ""
                 if parsed.kind == "targets" and cfg.targets_mode == "channel":
@@ -91,7 +117,7 @@ class TradingEngine:
                 else:
                     self.store.event("التحديث محفوظ؛ الميزة معطلة أو لا توجد صفقة مفتوحة", signal_id)
                 return signal_id
-            tick = self.broker.tick()
+            tick = tick or self.broker.tick()
             side = parsed.side or (reference["side"] if reference else "")
             if not side:
                 raise BrokerError("لا توجد إشارة سابقة لتحديد اتجاه إعادة الدخول")
@@ -118,7 +144,7 @@ class TradingEngine:
                       "side": side, "entry": entry, "signal_stop": stop, "created": now,
                       "expires": now + cfg.wait_minutes * 60 if cfg.expiry_enabled else None,
                       "sequence": max((s.get("sequence", 0) for s in self.signals.values()), default=0) + 1,
-                      "state": "pending", "config": cfg.to_dict(), "channel_targets": deepcopy(reference.get("channel_targets", [])) if parsed.kind == "repeat" and same else [],
+                      "state": "pending", "config": cfg.to_dict(), "channel_targets": parsed.targets or (deepcopy(reference.get("channel_targets", [])) if parsed.kind == "repeat" and same else []),
                       "targets": [], "completed": [], "realized": 0., "be_requested": False, "secured": False}
             self.save(signal)
             self.store.save_message(channel, message_id, raw, reply, identifier, now)
@@ -194,7 +220,10 @@ class TradingEngine:
             s["state"] = "sending"
             self.save(s)
             try:
+                started = time.monotonic()
+                s["entry_request_delay_ms"] = round(max(0, self.clock() - s["created"]) * 1000, 1)
                 p = self.broker.open(s["side"], volume, stop, comment)
+                s["broker_roundtrip_ms"] = round((time.monotonic() - started) * 1000, 1)
             except UncertainExecution as exc:
                 self.store.finish_action(action, "uncertain", {"error": str(exc), "comment": comment})
                 s["state"] = "uncertain"
@@ -209,7 +238,7 @@ class TradingEngine:
                 return
             self.store.finish_action(action, "done", p)
             self._attach(s, p)
-            self.store.event("أكد MT5 فتح الصفقة" if self.broker.mode == "live" else "تم فتح صفقة محاكاة", s["id"], ticket=p["ticket"], price=p["entry"], volume=p["volume"])
+            self.store.event("أكد MT5 فتح الصفقة" if self.broker.mode == "live" else "تم فتح صفقة محاكاة", s["id"], ticket=p["ticket"], price=p["entry"], volume=p["volume"], request_delay_ms=s["entry_request_delay_ms"], broker_roundtrip_ms=s["broker_roundtrip_ms"])
         except BrokerError as exc:
             self._entry_error(s, str(exc))
 
@@ -223,12 +252,13 @@ class TradingEngine:
             self.save(s)
             self.store.event(message, s["id"], "warning")
 
-    def _attach(self, s, p):
+    def _attach(self, s, p, sync_target=True):
         s.update(state="open", ticket=p["ticket"], position_id=p["position_id"], fill=p["entry"], volume=p["volume"], initial_volume=p["volume"],
                  sl=p["sl"], tp=p.get("tp", 0), opened=p["time"], symbol=p["symbol"], profit=p.get("profit", 0))
         self._set_targets(s, Settings.from_dict(s["config"]))
         self.save(s)
-        self._sync_target(s)
+        if sync_target:
+            self._sync_target(s)
 
     def _sync_target(self, s):
         cfg = Settings.from_dict(s["config"])
@@ -343,13 +373,7 @@ class TradingEngine:
             s = {"id": identifier, "root": identifier, "manual": True, "account": self.broker.identity, "channel": 0, "channel_name": "يدوي",
                  "entry": p["entry"], "side": p["side"], "signal_stop": p["sl"], "created": p["time"], "expires": None,
                  "config": cfg.to_dict(), "channel_targets": [], "completed": [], "realized": 0., "secured": False, "be_requested": False}
-            if cfg.manage_manual_stops:
-                tick = self.broker.tick()
-                stop = p["entry"] + (-1 if p["side"] == "buy" else 1) * cfg.stop_distance
-                if valid_stop(p["side"], stop, tick["bid"], tick["ask"], self.stop_minimum()):
-                    self.broker.modify(p["ticket"], stop)
-                    p = {**p, "sl": stop}
-            self._attach(s, p)
+            self._attach(s, p, sync_target=False)
             if not cfg.manage_manual_stops:
                 s["targets"] = []
                 s["config"]["breakeven_enabled"] = False
@@ -359,11 +383,44 @@ class TradingEngine:
     def _manual_enabled(self, s):
         if not s.get("manual"):
             return True
-        return self.settings.management_scope == "all" or self.settings.management_scope == "selected" and s["ticket"] in self.settings.selected_tickets
+        return self.settings.manage_manual_stops and (self.settings.management_scope == "all" or self.settings.management_scope == "selected" and s["ticket"] in self.settings.selected_tickets)
+
+    def _refresh_manual(self, s, tick):
+        cfg = self.settings
+        if s.get("manual_retry_at", 0) > self.clock():
+            return
+        config = cfg.to_dict()
+        if s.get("manual_config") == config:
+            return
+        s["config"] = config
+        self._set_targets(s, cfg)
+        stop = s.get("sl", 0)
+        if cfg.stop_mode == "fixed" or not stop:
+            desired = round(s["fill"] + (-1 if s["side"] == "buy" else 1) * cfg.stop_distance, self.broker.info["digits"])
+            # Keep an existing stop that already protects more profit.
+            improves = not stop or (desired > stop if s["side"] == "buy" else desired < stop)
+            if improves:
+                if not valid_stop(s["side"], desired, tick["bid"], tick["ask"], self.stop_minimum()):
+                    self._entry_error(s, "تعذر تطبيق ستوب الصفقة اليدوية: السعر الحالي أو السبريد خارج مسافة الستوب المحددة")
+                    self.save(s)
+                    return
+                try:
+                    self.broker.modify(s["ticket"], desired)
+                    s["sl"] = desired
+                except BrokerError as exc:
+                    s["manual_retry_at"] = self.clock() + 5
+                    self._entry_error(s, str(exc))
+                    self.save(s)
+                    return
+        s["manual_config"] = config
+        self.save(s)
+        self.store.event("فُعّلت إدارة الصفقة اليدوية حسب الإعدادات الحالية", s["id"])
 
     def manage(self, s, tick):
         if not self._manual_enabled(s):
             return
+        if s.get("manual"):
+            self._refresh_manual(s, tick)
         self._sync_target(s)
         quote = tick["bid"] if s["side"] == "buy" else tick["ask"]
         cfg = Settings.from_dict(s["config"])
@@ -467,8 +524,14 @@ class TradingEngine:
         if s["be_requested"] and s["volume"] >= self.broker.info["volume_min"]:
             self._secure(s)
 
-    def sync_history(self):
-        for s in self.current_signals():
+    def sync_history(self, budgeted=False):
+        signals = [s for s in self.current_signals() if s.get("position_id") and s["state"] in {"open", "closed"}]
+        if budgeted and signals:
+            # Archive size must not create an unbounded pause in Telegram reception.
+            total = len(signals)
+            signals = [signals[(self.history_cursor + i) % total] for i in range(min(3, total))]
+            self.history_cursor = (self.history_cursor + len(signals)) % total
+        for s in signals:
             if s.get("position_id") and s["state"] in {"open", "closed"}:
                 deals = self.broker.deals(s["position_id"])
                 tagged = [{**d, "signal": s["id"], "channel": s["channel"], "channel_name": s["channel_name"], "manual": s.get("manual", False)} for d in deals]
@@ -487,7 +550,7 @@ class TradingEngine:
             raise
         except BrokerError:
             if self.clock() - self.last_history >= 5:
-                self.sync_history()
+                self.sync_history(budgeted=True)
                 self.last_history = self.clock()
             raise
         for s in list(self.current_signals()):
@@ -500,7 +563,7 @@ class TradingEngine:
             self.reconcile()
             self.needs_reconcile = False
         if self.clock() - self.last_history >= 5:
-            self.sync_history()
+            self.sync_history(budgeted=True)
             self.last_history = self.clock()
 
     def expire_pending(self):
