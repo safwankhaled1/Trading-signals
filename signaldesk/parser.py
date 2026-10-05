@@ -39,7 +39,9 @@ def parse_message(raw: str) -> ParsedMessage:
         instrument = "BTC" if re.search(r"كوين|bitcoin|btc", instrument_match[0], re.I) else "XAU"
     match = re.search(r"\bمن\s*(" + NUMBER + ")", text)
     if not match and instrument_match:
-        match = re.match(r"\s*(?:من|عند|at|entry|@|:)?\s*(" + NUMBER + ")", text[instrument_match.end():], re.I)
+        # Channels also write "ذهب الآن 64" without the word "من".
+        # Keep the match anchored so an SL or report number cannot become the entry.
+        match = re.match(r"\s*(?:الان\b\s*)?(?:من|عند|at|entry|@|[:：])?\s*(" + NUMBER + ")", text[instrument_match.end():], re.I)
     stop = re.search(r"(?:ستوب|استوب|وقف(?:\s*الخسار[هة])?|\bsl\b)\s*[:：]?\s*(" + NUMBER + ")", text, re.I)
     if side and match and instrument:
         return ParsedMessage("repeat" if "كرر" in text else "entry", side, match[1], stop[1] if stop else None, instrument=instrument)

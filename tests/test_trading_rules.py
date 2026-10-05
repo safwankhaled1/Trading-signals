@@ -35,6 +35,65 @@ def test_short_price_and_half_dollar_stop(desk):
     assert s["volume"] == .03
 
 
+@pytest.mark.parametrize("text,kind,side", [
+    ("كرر شراء ذهب الان 64\n\nستوب 63.5", "repeat", "buy"),
+    ("كرر شراء ذهب الآن ٦٤\nستوب ٦٣٫٥", "repeat", "buy"),
+    ("شراء ذهب الآن 64\nستوب 63.5", "entry", "buy"),
+    ("كرر بيع ذهب الآن 64\nستوب 64.5", "repeat", "sell"),
+    ("اشتري دهب الآن\n64 ستوب 63.5", "entry", "buy"),
+    ("شراء XAUUSD الآن: 64 ستوب 63.5", "entry", "buy"),
+])
+def test_channel_now_price_formats(text, kind, side):
+    parsed = parse_message(text)
+    assert (parsed.kind, parsed.side, parsed.entry, parsed.instrument) == (kind, side, "64", "XAU")
+    assert parsed.stop == ("64.5" if side == "sell" else "63.5")
+
+
+@pytest.mark.parametrize("text", ["شراء ذهب الآن ستوب 63.5", "شراء ذهب الآن\nالأرباح 64 بيب"])
+def test_now_without_entry_never_uses_stop_or_report_number(text):
+    assert parse_message(text).kind == "ignored"
+
+
+def test_exact_channel_repeat_executes_once_and_reenters_only_after_new_message(desk):
+    engine, broker, _, _ = desk
+    broker.set_price(4164)
+    text = "كرر شراء ذهب الان 64\n\nستوب 63.5"
+    first = send(engine, text=text)
+    assert first["state"] == "open" and first["entry"] == 4164
+    assert first["sl"] == 4163.5
+    send(engine, mid=2, text=text)
+    assert len(broker.positions()) == 1
+    broker.close(first["ticket"], first["volume"], "manual")
+    engine.step()
+    send(engine, mid=2, text=text)  # An already ignored repeat must not become a new entry.
+    assert broker.positions() == []
+    second = send(engine, mid=3, text=text)
+    assert second["state"] == "open" and second["root"] == first["root"]
+    assert len(broker.positions()) == 1
+
+
+def test_exact_channel_repeat_different_price_opens_independent_position(desk):
+    engine, broker, _, _ = desk
+    broker.set_price(4163)
+    first = send(engine, text="شراء ذهب من 63 ستوب 62.5")
+    broker.set_price(4164)
+    second = send(engine, mid=2, text="كرر شراء ذهب الان 64\n\nستوب 63.5")
+    assert second["state"] == "open" and second["root"] != first["root"]
+    assert len(broker.positions()) == 2
+
+
+def test_exact_channel_repeat_waits_for_existing_margin(desk):
+    engine, broker, _, now = desk
+    broker.set_price(4167)
+    signal = send(engine, text="كرر شراء ذهب الان 64\n\nستوب 63.5")
+    assert signal["entry"] == 4164 and signal["state"] == "pending"
+    assert broker.positions() == []
+    now[0] += 60
+    broker.set_price(4164)
+    engine.step()
+    assert signal["state"] == "open" and signal["sl"] == 4163.5
+
+
 def test_gold_message_never_trades_on_selected_forex_symbol(desk):
     engine, broker, store, _ = desk
     broker.symbol = "EURUSD"

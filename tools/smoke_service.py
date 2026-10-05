@@ -58,10 +58,13 @@ def main():
             request("choose_channel", id=channel_id, name=channel_name)
             confirmed = wait_for(lambda s:s["settings"]["channel_id"] == channel_id)
             assert confirmed["settings"]["channel_name"] == channel_name
-        request("demo_signal", text="اشتري ذهب الآن من 4\nستوب 3.5")
+        request("demo_price", price=4164)
+        wait_for(lambda s:s.get("tick", {}).get("bid") == 4164)
+        request("demo_signal", text="كرر شراء ذهب الان 64\n\nستوب 63.5")
         opened = wait_for(lambda s:any(t["state"] == "open" for t in s["signals"]))
         trade = opened["signals"][0]
         assert trade["volume"] == .03
+        assert trade["entry"] == 4164 and trade["sl"] == 4163.5
         assert trade["tp"] == trade["targets"][-1]["price"]
         # Disconnect the desktop client; the engine must continue running alone.
         connection.close()
