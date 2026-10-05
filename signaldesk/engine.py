@@ -148,8 +148,8 @@ class TradingEngine:
                       "targets": [], "completed": [], "realized": 0., "be_requested": False, "secured": False}
             self.save(signal)
             self.store.save_message(channel, message_id, raw, reply, identifier, now)
-            self.store.event("استُقبلت إشارة دخول", identifier, entry=entry, side=side, quote=quote)
             self._try_entry(signal, tick)
+            self.store.event("استُقبلت إشارة دخول", identifier, entry=entry, side=side, quote=quote, received_at=now)
             return identifier
         except (ValueError, BrokerError) as exc:
             self.store.event(str(exc), signal_id, "warning", message_id=message_id)
@@ -334,8 +334,13 @@ class TradingEngine:
                 continue
             p = by_id.get(s["position_id"])
             if p:
-                s.update(ticket=p["ticket"], volume=p["volume"], sl=p["sl"], tp=p.get("tp", 0), profit=p["profit"])
-                self.save(s)
+                durable = dict(ticket=p["ticket"], volume=p["volume"], sl=p["sl"], tp=p.get("tp", 0))
+                changed = any(s.get(key) != value for key, value in durable.items())
+                # Floating profit is display data, refreshed from MT5 after a restart.
+                # Do not fsync it on every price poll; persist all trade changes immediately.
+                s.update(**durable, profit=p["profit"])
+                if changed:
+                    self.save(s)
             else:
                 # A successful positions query returned no position; verify history before marking closed.
                 deals = self.broker.deals(s["position_id"])
@@ -402,7 +407,6 @@ class TradingEngine:
             if improves:
                 if not valid_stop(s["side"], desired, tick["bid"], tick["ask"], self.stop_minimum()):
                     self._entry_error(s, "تعذر تطبيق ستوب الصفقة اليدوية: السعر الحالي أو السبريد خارج مسافة الستوب المحددة")
-                    self.save(s)
                     return
                 try:
                     self.broker.modify(s["ticket"], desired)
@@ -524,22 +528,31 @@ class TradingEngine:
         if s["be_requested"] and s["volume"] >= self.broker.info["volume_min"]:
             self._secure(s)
 
-    def sync_history(self, budgeted=False):
+    def sync_history(self, budgeted=False, limit=3):
         signals = [s for s in self.current_signals() if s.get("position_id") and s["state"] in {"open", "closed"}]
         if budgeted and signals:
             # Archive size must not create an unbounded pause in Telegram reception.
             total = len(signals)
-            signals = [signals[(self.history_cursor + i) % total] for i in range(min(3, total))]
+            signals = [signals[(self.history_cursor + i) % total] for i in range(min(limit, total))]
             self.history_cursor = (self.history_cursor + len(signals)) % total
         for s in signals:
             if s.get("position_id") and s["state"] in {"open", "closed"}:
                 deals = self.broker.deals(s["position_id"])
                 tagged = [{**d, "signal": s["id"], "channel": s["channel"], "channel_name": s["channel_name"], "manual": s.get("manual", False)} for d in deals]
                 self.store.save_deals(tagged)
-                s["realized"] = sum(d["net"] for d in deals)
-                self.save(s)
+                realized = sum(d["net"] for d in deals)
+                if s.get("realized") != realized:
+                    s["realized"] = realized
+                    self.save(s)
 
-    def step(self):
+    def archive_step(self):
+        if self.clock() - self.last_history >= 1:
+            self.last_history = self.clock()
+            self.sync_history(budgeted=True, limit=1)
+            return True
+        return False
+
+    def step(self, include_history=True):
         self.expire_pending()
         self.reconcile()
         # Reading positions/history does not require a fresh execution quote.
@@ -549,7 +562,7 @@ class TradingEngine:
         except AccountChanged:
             raise
         except BrokerError:
-            if self.clock() - self.last_history >= 5:
+            if include_history and self.clock() - self.last_history >= 5:
                 self.sync_history(budgeted=True)
                 self.last_history = self.clock()
             raise
@@ -562,7 +575,7 @@ class TradingEngine:
         if self.needs_reconcile:
             self.reconcile()
             self.needs_reconcile = False
-        if self.clock() - self.last_history >= 5:
+        if include_history and self.clock() - self.last_history >= 5:
             self.sync_history(budgeted=True)
             self.last_history = self.clock()
 

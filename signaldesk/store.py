@@ -152,7 +152,7 @@ class Store:
     def save_deals(self, deals):
         with self.db:
             for deal in deals:
-                self.db.execute("INSERT OR REPLACE INTO deals VALUES (?,?)", (str(deal["id"]), json.dumps(deal)))
+                self.db.execute("INSERT INTO deals VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data WHERE deals.data<>excluded.data", (str(deal["id"]), json.dumps(deal)))
 
     def deals(self):
         deals = [json.loads(r[0]) for r in self.db.execute("SELECT data FROM deals")]

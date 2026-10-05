@@ -18,6 +18,7 @@ from .reports import build_report, export_report
 from .security import save_secret
 from .store import Store
 from .telegram_client import TelegramGateway
+from .timing import high_resolution_timer
 
 
 class Service:
@@ -31,6 +32,8 @@ class Service:
         self.engine = None
         self.broker = None
         self.commands = queue.Queue()
+        self.loop = None
+        self.wakeup = asyncio.Event()
         self.running = True
         self.cache = {"mode": mode, "connected": False, "settings": self.settings.to_dict(), "signals": [], "events": [], "paused": True,
                       "account": {}, "tick": {}, "symbol": "", "channels": [], "terminals": [], "symbols": [], "telegram": "غير متصل", "report": {}, "notice": ""}
@@ -54,10 +57,10 @@ class Service:
     def on_message(self, channel, message_id, raw, reply, edited, received, channel_name):
         if edited and not self.store.message(channel, message_id):
             return
-        self.store.event("وصل تعديل رسالة من القناة" if edited else "وصلت رسالة جديدة من القناة", message_id=message_id, channel=channel)
         self.deferred.append([channel, message_id, raw, reply, edited, received, channel_name])
         self.store.set("inbox", self.deferred)
         self.drain_inbox()
+        self.store.event("وصل تعديل رسالة من القناة" if edited else "وصلت رسالة جديدة من القناة", message_id=message_id, channel=channel, received_at=received)
 
     def drain_inbox(self):
         if not self.engine or not self.deferred:
@@ -155,6 +158,8 @@ class Service:
                     command = connection.recv()
                     if command.get("action") != "snapshot":
                         self.commands.put(command)
+                        if self.loop:
+                            self.loop.call_soon_threadsafe(self.wakeup.set)
                     connection.send(self.cache)
             except (EOFError, OSError, ConnectionResetError):
                 pass
@@ -346,12 +351,37 @@ class Service:
                         heartbeat=time.time(), report_busy=bool(self.report_future and not self.report_future.done()))
         self.cache = snapshot
 
+    async def update_archive(self):
+        # Let Telegram callbacks run first and leave queued commands to the next turn.
+        # MT5 and SQLite remain on the same writer thread, one history query per turn.
+        await asyncio.sleep(0)
+        if self.running and self.engine and not self.deferred and self.commands.empty():
+            return self.engine.archive_step()
+        return False
+
+    async def wait_for_work(self):
+        if not self.commands.empty():
+            await asyncio.sleep(0)
+            return
+        active = self.engine and any(s["state"] in {"pending", "sending", "uncertain"}
+                    or s["state"] == "open" and self.engine._manual_enabled(s)
+                    for s in self.engine.current_signals())
+        interval = .001 if active or self.deferred else .05
+        try:
+            await asyncio.wait_for(self.wakeup.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            self.wakeup.clear()
+
     async def run(self):
+        self.loop = asyncio.get_running_loop()
         self.connect_broker()
         self.listen()
         await self.gateway.select_channel(self.settings.channel_id, self.settings.channel_name)
         last_snapshot = 0
         last_error = ""
+        last_archive_error = ""
         last_connection_attempt = time.time()
         tasks = set()
         async def background_command(cmd):
@@ -378,7 +408,7 @@ class Service:
             # Positions and pending entries are handled before rendering/reporting commands.
             if self.engine:
                 try:
-                    self.engine.step()
+                    self.engine.step(include_history=False)
                     last_error = ""
                 except AccountChanged:
                     self.connect_broker()
@@ -406,6 +436,20 @@ class Service:
                     self.notice = str(exc)
                     self.notice_id += 1
                     self.store.event(str(exc), level="warning", action=cmd.get("action"))
+            if not self.running:
+                break
+            try:
+                if await self.update_archive():
+                    last_archive_error = ""
+            except AccountChanged:
+                self.connect_broker()
+            except Exception as exc:
+                # An archive failure must not prevent execution in the next turn.
+                error = str(exc)
+                if error != last_archive_error:
+                    self.store.event(error, level="warning", action="archive")
+                    self.notice, last_archive_error = error, error
+                    self.notice_id += 1
             if self.report_future and self.report_future.done():
                 try:
                     report = self.report_future.result()
@@ -418,7 +462,7 @@ class Service:
             if time.time() - last_snapshot >= .25:
                 self.snapshot()
                 last_snapshot = time.time()
-            await asyncio.sleep(.03)
+            await self.wait_for_work()
         await self.gateway.disconnect()
         for task in tasks:
             task.cancel()
@@ -443,7 +487,8 @@ def run_service(mode):
         except OSError:
             return
         try:
-            asyncio.run(Service(mode).run())
+            with high_resolution_timer():
+                asyncio.run(Service(mode).run())
         finally:
             lock.seek(0)
             msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)

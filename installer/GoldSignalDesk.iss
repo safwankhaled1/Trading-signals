@@ -1,5 +1,8 @@
 #define AppName "Gold Signal Desk"
 #define AppVersion "0.1.1"
+#ifndef AppSourceDir
+  #define AppSourceDir "..\dist\GoldSignalDesk-" + AppVersion
+#endif
 [Setup]
 AppId={{13A274C6-77BD-4271-90EC-4C4DD49BF4B8}
 AppName={#AppName}
@@ -28,7 +31,7 @@ Name: "desktopicon"; Description: "إنشاء اختصار على سطح الم�
 Name: "startup"; Description: "تشغيل محرك MT5 عند تسجيل الدخول إلى Windows"; Flags: unchecked
 
 [Files]
-Source: "..\dist\GoldSignalDesk-{#AppVersion}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#AppSourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\GoldSignalDesk.exe"
