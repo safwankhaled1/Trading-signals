@@ -38,6 +38,11 @@ ApplicationWindow {
 
     function send(action, values) { bridge.send(JSON.stringify(Object.assign({action: action}, values || {}))) }
     function setCfg(key, value) { let next = Object.assign({}, cfg); next[key] = value; cfg = next; dirty = true }
+    function decimalValue(text) {
+        let value = String(text).trim().replace(/[٠-٩]/g, c => String(c.charCodeAt(0) - 0x660))
+            .replace(/[۰-۹]/g, c => String(c.charCodeAt(0) - 0x6f0)).replace(/[٫،,]/g, ".")
+        return /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value) && isFinite(Number(value)) ? Number(value) : null
+    }
     function number(value, decimals) { return value === undefined || value === null ? "—" : Number(value).toFixed(decimals === undefined ? 2 : decimals) }
     function stateName(state) { return ({open:"مفتوحة",closed:"مغلقة",pending:"بانتظار السعر",expired:"انتهت المهلة",cancelled:"ملغاة",rejected:"مرفوضة",uncertain:"تحتاج مطابقة",sending:"جارٍ التأكيد"})[state] || state }
     function timeText(value) { return new Date(value * 1000).toLocaleString(Qt.locale("ar"), "MM/dd hh:mm:ss") }
@@ -55,12 +60,13 @@ ApplicationWindow {
         let symbols = d.symbols || []
         if (JSON.stringify(symbolOptions) !== JSON.stringify(symbols)) symbolOptions = symbols
     }
-    Component.onCompleted: updateConnectionModels()
+    Component.onCompleted: { accountContext = d.account_id || ""; updateConnectionModels() }
     Connections {
         target: bridge
         function onChanged() {
             let account = root.d.account_id || ""
             if (account && account !== root.accountContext) {
+                root.contentItem.forceActiveFocus()
                 root.accountContext = account
                 enableDialog.close()
                 root.message = ""
@@ -112,13 +118,32 @@ ApplicationWindow {
         leftPadding: 12; rightPadding: 12
         background: Rectangle { radius: 8; color: "#0d161e"; border.color: field.activeFocus ? root.accent : "#2b3943" }
     }
+    component DecimalInput: Input {
+        id: decimalField
+        property var numericValue
+        signal numberEdited(var value)
+        inputMethodHints: Qt.ImhFormattedNumbersOnly
+        // Updating cfg must not replace an in-progress value such as "0." or "0.0".
+        Binding {
+            target: decimalField; property: "text"
+            value: String(decimalField.numericValue)
+            when: !decimalField.activeFocus
+            restoreMode: Binding.RestoreNone
+        }
+        onTextEdited: {
+            let value = root.decimalValue(text)
+            // Preserve invalid/unfinished text so saving rejects it instead of using an old value.
+            numberEdited(value === null ? text : value)
+        }
+    }
     component Numeric: ColumnLayout {
+        id: numericSetting
         property string label
         property string settingKey
         Layout.fillWidth: true
         spacing: 7
         LabelText { text: parent.label; color: root.muted; Layout.fillWidth: true }
-        Input { Layout.fillWidth: true; text: String(root.cfg[parent.settingKey]); inputMethodHints: Qt.ImhFormattedNumbersOnly; onTextEdited: root.setCfg(parent.settingKey, Number(text)); }
+        DecimalInput { objectName: "numeric_" + numericSetting.settingKey; Layout.fillWidth: true; numericValue: root.cfg[numericSetting.settingKey]; onNumberEdited: value => root.setCfg(numericSetting.settingKey, value) }
     }
     component Choice: ColumnLayout {
         property string label
@@ -374,7 +399,7 @@ ApplicationWindow {
         ColumnLayout {
             spacing:16
             RowLayout { Layout.fillWidth:true
-                Action { text:"حفظ الإعدادات"; primary:true; onClicked:root.saveConfig(false) }
+                Action { objectName:"saveSettingsButton"; text:"حفظ الإعدادات"; primary:true; onClicked:root.saveConfig(false) }
                 Action { text:"استعادة المحفوظ"; onClicked:{root.cfg=JSON.parse(JSON.stringify(bridge.settings)); root.dirty=false; pageLoader.active=false; pageLoader.active=true} }
                 LabelText { text:root.dirty ? "تغييرات غير محفوظة" : "الإعدادات المحفوظة للإشارات الجديدة"; color:root.dirty ? root.accent : root.muted; Layout.fillWidth:true }
             }
