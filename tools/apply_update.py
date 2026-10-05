@@ -69,7 +69,8 @@ def main():
                 raise RuntimeError("Unable to verify the current worker state")
             snapshot = connection.recv()
             active = [s for s in snapshot.get("signals", []) if s["state"] in {"open", "pending", "sending", "uncertain"}]
-            if active:
+            # Demo positions have no broker exposure and are restored from their saved state.
+            if active and mode != "demo":
                 raise RuntimeError("Worker has active signals or trades; stop it from the application before updating")
         # Keep the previous files recoverable before closing any process.
         if not backup.exists():
