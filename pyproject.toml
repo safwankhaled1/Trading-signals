@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gold-signal-desk"
+version = "0.1.1"
+description = "Arabic Telegram to MT5 desktop trading assistant"
+requires-python = ">=3.11,<3.15"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.packages.find]
+include = ["signaldesk*"]
+
+[tool.setuptools.package-data]
+signaldesk = ["qml/*.qml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
