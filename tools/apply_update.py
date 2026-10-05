@@ -1,4 +1,4 @@
-"""Replace the existing portable installation after verifying idle worker state."""
+"""Replace the portable installation; restarting managed trades requires explicit opt-in."""
 from __future__ import annotations
 
 import argparse
@@ -25,11 +25,27 @@ def within_project(path):
     return resolved
 
 
+def validate_worker(snapshot, mode, allow_active_restart=False):
+    active = [s for s in snapshot.get("signals", []) if s["state"] in {"open", "pending", "sending", "uncertain"}]
+    managed = [s for s in active if not (s.get("manual") and s["state"] == "open"
+               and not s.get("config", {}).get("manage_manual_stops")
+               and not snapshot.get("settings", {}).get("manage_manual_stops"))]
+    if mode != "demo":
+        if any(s["state"] in {"sending", "uncertain"} for s in managed):
+            raise RuntimeError("Resolve in-flight or uncertain trade requests before updating")
+        if managed and not allow_active_restart:
+            raise RuntimeError("Worker has active signals or trades; stop it from the application before updating")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--restart", action="store_true")
     parser.add_argument("--engine-stopped", action="store_true")
+    parser.add_argument("--allow-active-restart", action="store_true",
+                        help="Only after explicit user approval of a temporary interruption to trade management")
     args = parser.parse_args()
+    if args.allow_active_restart and (not args.restart or args.engine_stopped):
+        parser.error("Active-trade updates require --restart without --engine-stopped")
     source = within_project(project / ".tools" / "update-package" / "GoldSignalDesk-0.1.1")
     target = within_project(project / "dist" / "GoldSignalDesk-0.1.1")
     backup = within_project(project / ".tools" / "update-backup-0.1.1")
@@ -68,14 +84,7 @@ def main():
             if not connection.poll(5):
                 raise RuntimeError("Unable to verify the current worker state")
             snapshot = connection.recv()
-            active = [s for s in snapshot.get("signals", []) if s["state"] in {"open", "pending", "sending", "uncertain"}]
-            # Read-only manual monitoring has no active broker management to interrupt.
-            managed = [s for s in active if not (s.get("manual") and s["state"] == "open"
-                       and not s.get("config", {}).get("manage_manual_stops")
-                       and not snapshot.get("settings", {}).get("manage_manual_stops"))]
-            # Demo positions are restored from their saved state and have no broker exposure.
-            if managed and mode != "demo":
-                raise RuntimeError("Worker has active signals or trades; stop it from the application before updating")
+            validate_worker(snapshot, mode, args.allow_active_restart)
         # Keep the previous files recoverable before closing any process.
         if not backup.exists():
             shutil.copytree(target, backup)
