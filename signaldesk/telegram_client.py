@@ -108,8 +108,8 @@ class TelegramGateway:
 
     def set_channels(self, channels, reset=False):
         chosen = [{"id": int(c["id"]), "name": str(c["name"])} for c in channels if c["id"]]
-        if len(chosen) > 2 or len({c["id"] for c in chosen}) != len(chosen):
-            raise ValueError("اختر قناتين مختلفتين كحد أقصى")
+        if len({c["id"] for c in chosen}) != len(chosen):
+            raise ValueError("القناة مضافة إلى المراقبة بالفعل")
         previous = self.monitored
         self.monitored = {}
         for channel in chosen:
@@ -133,11 +133,13 @@ class TelegramGateway:
         if not self.authorized or not self.client:
             return
         client = self.client
+        slots = asyncio.Semaphore(4)
 
         async def baseline(identifier, state):
             try:
                 entity = self.channel_entities.get(identifier, identifier)
-                latest = await client.get_messages(entity, limit=1)
+                async with slots:
+                    latest = await client.get_messages(entity, limit=1)
                 if self.monitored.get(identifier) is not state or self.client is not client:
                     return
                 state.update(floor=latest[0].id if latest else 0, ready=True, error="")

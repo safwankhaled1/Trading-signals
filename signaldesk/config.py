@@ -40,8 +40,7 @@ class Settings:
     symbol: str = ""
     channel_id: int = 0
     channel_name: str = ""
-    second_channel_id: int = 0
-    second_channel_name: str = ""
+    watched_channels: list = field(default_factory=list)
     shared_channel_settings: bool = True
     pip_size: float = 0.10
     report_utc_offset: float = 0.0
@@ -50,6 +49,12 @@ class Settings:
 
     @classmethod
     def from_dict(cls, value):
+        value = dict(value)
+        if "watched_channels" not in value:
+            value["watched_channels"] = [{"id": value.get(id_key, 0), "name": value.get(name_key, "")}
+                                        for id_key, name_key in (("channel_id", "channel_name"),
+                                                                  ("second_channel_id", "second_channel_name"))
+                                        if value.get(id_key)]
         known = cls.__dataclass_fields__
         obj = cls(**{k: v for k, v in value.items() if k in known})
         obj.validate()
@@ -89,11 +94,18 @@ class Settings:
             raise ValueError("مرحلة التأمين تبدأ من 1")
         self.selected_tickets = [int(t) for t in self.selected_tickets]
         self.channel_id = int(self.channel_id)
-        self.second_channel_id = int(self.second_channel_id)
-        if self.second_channel_id and not self.channel_id:
-            raise ValueError("اختر القناة الأولى قبل إضافة قناة ثانية")
-        if self.second_channel_id and self.second_channel_id == self.channel_id:
-            raise ValueError("القناة الثانية يجب أن تختلف عن القناة الأولى")
+        self.watched_channels = [{"id": int(c["id"]), "name": str(c.get("name") or c["id"])}
+                                 for c in self.watched_channels]
+        ids = [c["id"] for c in self.watched_channels]
+        if 0 in ids or len(set(ids)) != len(ids):
+            raise ValueError("قائمة القنوات تحتوي قناة غير صالحة أو مكررة")
+        if not self.watched_channels and self.channel_id:
+            self.watched_channels = [{"id": self.channel_id, "name": self.channel_name or str(self.channel_id)}]
+        if self.watched_channels:
+            selected = next((c for c in self.watched_channels if c["id"] == self.channel_id), self.watched_channels[0])
+            self.channel_id, self.channel_name = selected["id"], selected["name"]
+        else:
+            self.channel_id, self.channel_name = 0, ""
         self.report_utc_offset = float(self.report_utc_offset)
         if not math.isfinite(self.report_utc_offset) or not -14 <= self.report_utc_offset <= 14:
             raise ValueError("فرق توقيت الوسيط يجب أن يكون بين -14 و14 ساعة")
@@ -102,5 +114,5 @@ class Settings:
         return asdict(self)
 
     def monitored_channels(self):
-        return [{"id": identifier, "name": name} for identifier, name in (
-            (self.channel_id, self.channel_name), (self.second_channel_id, self.second_channel_name)) if identifier]
+        return [dict(c) for c in self.watched_channels] or (
+            [{"id": self.channel_id, "name": self.channel_name}] if self.channel_id else [])

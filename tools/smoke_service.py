@@ -58,8 +58,10 @@ def main():
             request("choose_channel", id=channel_id, name=channel_name)
             confirmed = wait_for(lambda s:s["settings"]["channel_id"] == channel_id)
             assert confirmed["settings"]["channel_name"] == channel_name
-        request("choose_second_channel", id=-1001001, name="قناة الاختبار الأولى")
-        confirmed = wait_for(lambda s:s["settings"].get("second_channel_id") == -1001001)
+        request("add_channel", id=-1001001, name="قناة الاختبار الأولى")
+        wait_for(lambda s:len(s["settings"].get("watched_channels",[])) == 2)
+        request("add_channel", id=-1001003, name="قناة الاختبار الثالثة")
+        confirmed = wait_for(lambda s:len(s["settings"].get("watched_channels",[])) == 3)
         assert confirmed["settings"]["channel_id"] == -1001002
         request("demo_price", price=4164)
         wait_for(lambda s:s.get("tick", {}).get("bid") == 4164)
@@ -97,7 +99,7 @@ def main():
         assert restored["signals"][0]["completed"] == ["stage:0"]
         assert restored["signals"][0]["tp"] == restored["signals"][0]["targets"][-1]["price"]
         assert restored["settings"]["channel_id"] == -1001002
-        assert restored["settings"]["second_channel_id"] == -1001001
+        assert {c["id"] for c in restored["settings"]["watched_channels"]} == {-1001001,-1001002,-1001003}
         # Exercise the omitted-instrument format from the user's actual channel.
         request("demo_price", price=4160)
         wait_for(lambda s:all(t["state"] != "open" for t in s["signals"]))
@@ -127,9 +129,18 @@ def main():
         both = wait_for(lambda s:sum(t["state"] == "open" for t in s["signals"]) == 2)
         assert {t["channel"] for t in both["signals"] if t["state"] == "open"} == {-1001001, -1001002}
         assert all(t["volume"] == .04 and t["sl"] == 4114.5 for t in both["signals"] if t["state"] == "open")
+        request("settings", settings={**both["settings"],"targets_mode":"channel"})
+        wait_for(lambda s:s["settings"]["targets_mode"] == "channel")
+        request("demo_signal", channel=-1001003, text="GOLD ❇️SELL❇️@ 📝 4117 - 4118\nTP1 🔼 4110\nTP2 🔼 4100\nTP3 🔼 4090\nSL 👀 4124\n📨#FXENGIN")
+        three = wait_for(lambda s:sum(t["state"] == "open" for t in s["signals"]) == 3)
+        last = next(t for t in three["signals"] if t["state"] == "open" and t["channel"] == -1001003)
+        assert (last["entry_low"],last["entry_high"],last["sl"],last["tp"]) == (4117,4118,4124,4090)
+        request("demo_signal", channel=-1001003, text="عزز شراء ✅")
+        announcements = wait_for(lambda s:any("رسالة تمهيدية" in e["message"] for e in s["events"]))
+        assert sum(t["state"] == "open" for t in announcements["signals"]) == 3
         request("stop")
         process.wait(timeout=10)
-        print("Service smoke passed: two-channel persistence and execution, IPC, partial close, breakeven, restart, direct entry with channel SL and missing-SL rejection.")
+        print("Service smoke passed: three-channel persistence and independent execution; decorated range with TP1/TP2/TP3 and exact SL; announcement deduplication; IPC, partial close, breakeven, restart and direct entry guards.")
     finally:
         if connection:
             connection.close()

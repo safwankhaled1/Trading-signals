@@ -65,10 +65,16 @@ class ParsedMessage:
     targets: list[float] = field(default_factory=list)
     instrument: str = ""
     reason: str = ""
+    entry_end: str | None = None
 
 
 def parse_message(raw: str) -> ParsedMessage:
-    text = WORDS.sub(lambda m: _word(m[0]), normalize(raw))
+    text = normalize(raw).replace("−", "-")
+    text = "".join(" " if unicodedata.category(c).startswith("S") or c in "\ufe0e\ufe0f\u20e3" else c for c in text)
+    text = WORDS.sub(lambda m: _word(m[0]), text)
+    # normalize() separates TP1 into TP 1. Its small ordinal is a label,
+    # while the following full price remains untouched.
+    text = re.sub(r"\bاهداف\s+[1-9]\d?(?=\s|[:：=@])(?=\s*[:：=@]?\s*\d{3,}(?:\D|$))", "اهداف", text)
     if re.search(r"نحجز\s*ربح|احجز\s*ربح|حجز\s*ربح", text):
         return ParsedMessage("manage")
     sides = {side for word, side in (("شراء", "buy"), ("بيع", "sell")) if re.search(r"\b" + word + r"\b", text)}
@@ -111,16 +117,25 @@ def parse_message(raw: str) -> ParsedMessage:
     excluded = [(m.start(), m.end()) for m in stop_matches]
     if target_marker:
         excluded.append((target_marker.start(), target_end))
-    numbers = [m[0] for m in re.finditer(NUMBER, text) if not any(a <= m.start() < b for a, b in excluded)]
+    number_matches = [m for m in re.finditer(NUMBER, text) if not any(a <= m.start() < b for a, b in excluded)]
+    numbers = [m[0] for m in number_matches]
+    entry_end = None
     if len(numbers) > 1:
-        return ParsedMessage("ambiguous", reason="الإشارة تحتوي عدة أسعار دخول؛ لم يتم اختيار سعر عشوائي")
+        separator = text[number_matches[0].end():number_matches[1].start()]
+        if len(numbers) == 2 and re.fullmatch(r"\s*(?:[-–—/]|to|الي)\s*", separator):
+            entry_end = numbers[1]
+        else:
+            return ParsedMessage("ambiguous", reason="الإشارة تحتوي عدة أسعار دخول؛ لم يتم اختيار سعر عشوائي")
     if not numbers:
         if repeated:
             return ParsedMessage("repeat", side=side, instrument=instrument, stop=stops[0] if stops else None)
+        if not stop_marker and not target_marker:
+            return ParsedMessage("announcement", side=side, instrument=instrument)
         return ParsedMessage("ambiguous", reason="تعذر قراءة سعر دخول الإشارة")
     if re.search(r"نقطه|نقاط|بيب|\bpips?\b|حصاد|صافي|ربحنا|حققنا", text):
         return ParsedMessage()
-    return ParsedMessage("repeat" if repeated else "entry", side, numbers[0], stops[0] if stops else None, targets, instrument)
+    return ParsedMessage("repeat" if repeated else "entry", side, numbers[0], stops[0] if stops else None, targets, instrument,
+                         entry_end=entry_end)
 
 
 def expand_price(token: str, current: float, max_distance: float = 25.0) -> float:

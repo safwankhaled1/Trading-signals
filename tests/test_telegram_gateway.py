@@ -292,3 +292,33 @@ def test_overlapping_syncs_share_baseline_request_without_resetting_new_messages
         assert gateway.message_floor == 101
 
     asyncio.run(run())
+
+
+def test_any_number_of_channels_receives_independently_with_bounded_initial_requests(tmp_path):
+    received = []
+    gateway = TelegramGateway(tmp_path, lambda *args:received.append(args), lambda _:None)
+    gateway.authorized = True
+    active = 0
+    peak = 0
+
+    class Client:
+        async def get_messages(self, entity, limit):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(.001)
+            active -= 1
+            return [SimpleNamespace(id=100)]
+
+    gateway.client = Client()
+
+    async def run():
+        channels = [{"id":-1001-i,"name":str(i)} for i in range(12)]
+        await gateway.select_channels(channels)
+        assert gateway.baseline_ready and peak <= 4
+        for c in channels:
+            await gateway._new_message(event(101, channel=c["id"]))
+        assert len(received) == 12 and len({a[0] for a in received}) == 12
+        assert len(gateway.channel_statuses()) == 12
+
+    asyncio.run(run())

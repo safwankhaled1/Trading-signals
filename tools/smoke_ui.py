@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import argparse
 import os
 import sys
 import time
@@ -22,6 +23,9 @@ from signaldesk.reports import build_report
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--qml", default=str(project / "signaldesk/qml/Main.qml"))
+    args = parser.parse_args()
     warnings = []
     def handler(kind, context, message):
         warnings.append(message)
@@ -38,9 +42,21 @@ def main():
     bridge.update(json.loads(json.dumps(sample)))
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("bridge", bridge)
-    engine.load(QUrl.fromLocalFile(str(project / "signaldesk" / "qml" / "Main.qml")))
+    engine.load(QUrl.fromLocalFile(args.qml))
     assert engine.rootObjects(), warnings
     window = engine.rootObjects()[0]
+    def visual_control(name):
+        # Repeater delegates live in the visual tree, which can differ from
+        # QObject ownership; find the displayed item rather than its owner.
+        def visit(item):
+            if item.objectName() == name:
+                return item
+            for child in item.childItems():
+                found = visit(child)
+                if found is not None:
+                    return found
+            return None
+        return visit(window.contentItem())
     # Repeated IPC snapshots must not reset a user's uncommitted choice.
     import queue
     bridge.client = type("FakeClient", (), {"commands": queue.Queue()})()
@@ -48,6 +64,7 @@ def main():
     sample["symbols"] = [{"name": "EURUSD", "visible": True}, {"name": "XAUUSD", "visible": True}, {"name": "GBPUSD", "visible": False}, {"name": "BTCUSD.m", "description": "Bitcoin / US Dollar", "visible": True}]
     sample["settings"]["channel_id"] = -1001001
     sample["settings"]["channel_name"] = "القناة الأولى"
+    sample["settings"]["watched_channels"] = [{"id":-1001001,"name":"القناة الأولى"}]
     sample["connected"] = False
     from signaldesk import __version__, ENGINE_PROTOCOL
     sample["version"] = __version__
@@ -96,26 +113,36 @@ def main():
     bridge.update(json.loads(json.dumps(sample)))
     app.processEvents()
     assert channels.property("currentIndex") == 0
-    QMetaObject.invokeMethod(window.findChild(QObject, "chooseChannelButton"), "clicked")
+    QMetaObject.invokeMethod(window.findChild(QObject, "addChannelButton"), "clicked")
     command = bridge.client.commands.get_nowait()
-    assert command["action"] == "choose_channel" and command["id"] == -1001002
-    sample["settings"].update(channel_id=-1001002, channel_name="القناة الثانية", symbol="BTCUSD.m")
+    assert command["action"] == "add_channel" and command["id"] == -1001002
+    sample["settings"]["watched_channels"].append({"id":-1001002,"name":"القناة الثانية"})
+    sample["settings"].update(symbol="BTCUSD.m", shared_channel_settings=True)
     bridge.update(json.loads(json.dumps(sample)))
     app.processEvents()
-    assert "القناة الثانية" in label.property("text")
-    second_combo = window.findChild(QObject, "secondChannelCombo")
-    assert second_combo.property("count") == 1
-    QMetaObject.invokeMethod(window.findChild(QObject, "chooseSecondChannelButton"), "clicked")
+    assert "2" in label.property("text")
+    assert window.findChild(QObject,"secondChannelCombo") is None
+    assert window.findChild(QObject,"addChannelButton").property("enabled") is False
+    sample["channels"].append({"id":-1001003,"name":"القناة الثالثة"})
+    bridge.update(json.loads(json.dumps(sample)))
+    app.processEvents()
+    channels.setProperty("currentIndex",2)
+    QMetaObject.invokeMethod(channels,"activated",Q_ARG(int,2))
+    QMetaObject.invokeMethod(window.findChild(QObject,"addChannelButton"),"clicked")
     command = bridge.client.commands.get_nowait()
-    assert command["action"] == "choose_second_channel" and command["id"] == -1001001
-    sample["settings"].update(second_channel_id=-1001001, second_channel_name="القناة الأولى", shared_channel_settings=True)
+    assert command["action"] == "add_channel" and command["id"] == -1001003
+    sample["settings"]["watched_channels"].append({"id":-1001003,"name":"القناة الثالثة"})
     sample["monitored_channels"] = [{"id": -1001002, "name": "القناة الثانية", "ready": True, "error": ""},
-                                    {"id": -1001001, "name": "القناة الأولى", "ready": True, "error": ""}]
+                                    {"id": -1001001, "name": "القناة الأولى", "ready": True, "error": ""},
+                                    {"id": -1001003, "name": "القناة الثالثة", "ready": False, "error": "سبب فشل القناة للاختبار"}]
     bridge.update(json.loads(json.dumps(sample)))
     app.processEvents()
-    assert "القناة الأولى" in window.findChild(QObject, "savedSecondChannelLabel").property("text")
-    QMetaObject.invokeMethod(window.findChild(QObject, "removeSecondChannelButton"), "clicked")
-    assert bridge.client.commands.get_nowait()["action"] == "remove_second_channel"
+    assert "3" in label.property("text")
+    assert visual_control("watchedChannel_-1001003") is not None, warnings
+    assert "سبب فشل" in visual_control("channelState_-1001003").property("text")
+    QMetaObject.invokeMethod(visual_control("removeChannel_-1001002"), "clicked")
+    command = bridge.client.commands.get_nowait()
+    assert command["action"] == "remove_channel" and command["id"] == -1001002
     sample.update(mode="live", connected=True, quote_ready=False, quote_error="سعر الرمز قديم؛ بانتظار تحديث من الوسيط",
                   account={"login": 123, "trade_allowed": True, "hedging": True}, paused=True,
                   telegram="متصل", telegram_connected=True, channel_listening=True)
@@ -146,7 +173,7 @@ def main():
     different.update(account_id="test:222", connected=True, quote_ready=True, symbol="EURUSD",
                      account={"login":222,"server":"test","hedging":True,"trade_allowed":True},
                      signals=[], events=[], report={}, mt5_error="", quote_error="")
-    different["settings"].update(symbol="EURUSD", channel_id=-1001001, channel_name="القناة الأولى", second_channel_id=0, second_channel_name="")
+    different["settings"].update(symbol="EURUSD", channel_id=-1001001, channel_name="القناة الأولى", watched_channels=[{"id":-1001001,"name":"القناة الأولى"}])
     bridge.update(different)
     app.processEvents()
     assert not window.property("dirty") and window.property("symbolSearch") == ""
@@ -173,7 +200,8 @@ def main():
     connections_page = window.findChild(QObject, "pageLoader").property("item")
     assert connections_page.findChild(QObject, "startEngineButton").property("visible")
     assert not connections_page.findChild(QObject, "stopEngineButton").property("enabled")
-    sample.update(mode="demo", connected=True, mt5_error="", quote_error="", telegram_error="", telegram_connected=True, channel_listening=True)
+    sample.update(mode="demo", connected=True, mt5_error="", quote_error="", telegram_error="", telegram_connected=True,
+                  channel_listening=all(c["ready"] for c in sample["monitored_channels"]))
     bridge.update(json.loads(json.dumps(sample)))
     bridge.client = None
     for page in range(8):
@@ -197,7 +225,7 @@ def main():
     assert not serious, serious
     window.close()
     app.processEvents()
-    print("UI smoke passed: account switch/dirty choices/cache clearing; actual symbol labels; symbol search/name/description/no-results; connection success/failure; entry activation with stale quote; channel persistence; all 8 pages rendered; Arabic PDF; no QML binding errors.")
+    print("UI smoke passed: single channel picker, three watched rows with status/removal and duplicate prevention; account switch; symbol search; connection success/failure; all 8 pages rendered; Arabic PDF; no QML binding errors.")
 
 
 if __name__ == "__main__":

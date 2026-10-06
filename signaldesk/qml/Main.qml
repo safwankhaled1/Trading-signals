@@ -27,8 +27,7 @@ ApplicationWindow {
     property string symbolSearch: ""
     property var filteredSymbols: symbolOptions.filter(s => !symbolSearch.trim() || (s.name + " " + (s.description || "")).toLowerCase().includes(symbolSearch.trim().toLowerCase()))
     property double selectedChannelId: cfg.channel_id || 0
-    property double selectedSecondChannelId: cfg.second_channel_id || 0
-    property var secondChannelOptions: channelOptions.filter(c => c.id !== cfg.channel_id)
+    property var watchedChannels: bridge.settings.watched_channels || []
     property string accountContext: ""
     property string message: ""
     property color accent: "#c9ac70"
@@ -51,7 +50,9 @@ ApplicationWindow {
     function currentSignals(state) { return (d.signals || []).filter(s => !state || s.state === state) }
     function realized() { return (d.signals || []).reduce((sum,s) => sum + (s.realized || 0), 0) }
     function floating() { return currentSignals("open").reduce((sum,s) => sum + (s.profit || 0), 0) }
-    function channelNames() { let s=bridge.settings; return [s.channel_name, s.second_channel_name].filter(n=>!!n).join(" • ") }
+    function channelNames() { return watchedChannels.map(c=>c.name).join(" • ") }
+    function channelStatus(id) { return (d.monitored_channels || []).find(c=>c.id===id) || {ready:false,error:""} }
+    function entryText(s) { return s.entry_low !== undefined && s.entry_low !== s.entry_high ? number(s.entry_low) + " — " + number(s.entry_high) : number(s.entry) }
     function saveConfig(cancelPrevious) {
         bridge.saveSettings(JSON.stringify({settings:cfg, cancel_previous:cancelPrevious || false})); dirty = false
     }
@@ -77,7 +78,6 @@ ApplicationWindow {
                 root.dirty = false
                 root.cfg = JSON.parse(JSON.stringify(bridge.settings))
                 root.selectedChannelId = root.cfg.channel_id || 0
-                root.selectedSecondChannelId = root.cfg.second_channel_id || 0
                 root.symbolSearch = ""
             }
             root.updateConnectionModels()
@@ -85,10 +85,6 @@ ApplicationWindow {
         function onSettingsChanged() {
             if (!root.dirty) {
                 let next = JSON.parse(JSON.stringify(bridge.settings))
-                if (next.channel_id !== root.cfg.channel_id) {
-                    root.selectedChannelId = next.channel_id
-                }
-                if (next.second_channel_id !== root.cfg.second_channel_id) root.selectedSecondChannelId = next.second_channel_id || 0
                 root.cfg = next
             }
         }
@@ -246,7 +242,7 @@ ApplicationWindow {
             Item { Layout.fillWidth: true }
             ColumnLayout {
                 LabelText { text: root.titles[root.page]; font.pixelSize: 29; font.weight: Font.DemiBold; Layout.alignment: Qt.AlignRight }
-                LabelText { text: root.channelNames() || "متابعة الإشارات وتنفيذها وإدارة نتائجها"; color: root.muted; font.pixelSize: 12; Layout.alignment: Qt.AlignRight }
+                LabelText { text: root.watchedChannels.length>3 ? "مراقبة " + root.watchedChannels.length + " قنوات" : root.channelNames() || "متابعة الإشارات وتنفيذها وإدارة نتائجها"; color: root.muted; font.pixelSize: 12; Layout.alignment: Qt.AlignRight }
             }
         }
         Rectangle { Layout.fillWidth: true; height: 1; color: "#243039" }
@@ -371,8 +367,8 @@ ApplicationWindow {
                                 LabelText { text:modelData.last_error || "بانتظار دخول السعر ضمن الهامش"; color:root.muted; Layout.fillWidth:true; wrapMode:Text.Wrap; elide:Text.ElideNone }
                             }
                             ColumnLayout { Layout.fillWidth:true
-                                SectionTitle { text:(modelData.side === "buy" ? "شراء" : "بيع") + " من " + root.number(modelData.entry) }
-                                LabelText { text:root.number(modelData.entry-modelData.config.entry_margin) + " — " + root.number(modelData.entry+modelData.config.entry_margin); color:root.muted; Layout.fillWidth:true }
+                                SectionTitle { text:(modelData.side === "buy" ? "شراء" : "بيع") + " من " + root.entryText(modelData) }
+                                LabelText { text:root.number((modelData.entry_low === undefined ? modelData.entry : modelData.entry_low)-modelData.config.entry_margin) + " — " + root.number((modelData.entry_high === undefined ? modelData.entry : modelData.entry_high)+modelData.config.entry_margin); color:root.muted; Layout.fillWidth:true }
                                 LabelText { text:modelData.channel_name; color:root.muted; font.pixelSize:12; Layout.fillWidth:true }
                             }
                         }
@@ -409,14 +405,14 @@ ApplicationWindow {
                 Action { text:"استعادة المحفوظ"; onClicked:{root.cfg=JSON.parse(JSON.stringify(bridge.settings)); root.dirty=false; pageLoader.active=false; pageLoader.active=true} }
                 LabelText { text:root.dirty ? "تغييرات غير محفوظة" : "الإعدادات المحفوظة للإشارات الجديدة"; color:root.dirty ? root.accent : root.muted; Layout.fillWidth:true }
             }
-            LabelText { visible:!!root.cfg.second_channel_id; text:root.cfg.shared_channel_settings ? "هذه إعدادات التنفيذ المشتركة للقناتين" : "تعديل إعدادات القناة: " + root.cfg.channel_name + " • إعدادات القناة الثانية محفوظة بشكل مستقل"; color:root.accent; Layout.fillWidth:true; wrapMode:Text.Wrap }
+            LabelText { visible:root.watchedChannels.length>0; text:root.cfg.shared_channel_settings ? "هذه إعدادات التنفيذ المشتركة لكل القنوات المضافة" : "تعديل إعدادات القناة: " + root.cfg.channel_name + " • باقي القنوات تظل تحت المراقبة بإعداداتها المحفوظة"; color:root.accent; Layout.fillWidth:true; wrapMode:Text.Wrap }
             ScrollView { Layout.fillWidth:true; Layout.fillHeight:true; clip:true; contentWidth:availableWidth
                 ColumnLayout { width:parent.width; spacing:18
                     Card { Layout.fillWidth:true; implicitHeight: entrySettings.implicitHeight+40
                         ColumnLayout { id:entrySettings; anchors.left:parent.left; anchors.right:parent.right; anchors.top:parent.top; anchors.margins:20; spacing:14
                             SectionTitle { text:"الدخول والانتظار" }
                             Choice { label:"طريقة الدخول"; settingKey:"entry_mode"; labels:["ضمن هامش سعر الإشارة", "مباشر بسعر السوق مهما كان السعر"]; values:["range", "direct"] }
-                            LabelText { objectName:"entryModeHelp"; text:root.cfg.entry_mode === "direct" ? "ينفّذ فور وصول الإشارة بسعر السوق، ويلتزم بستوب القناة. إشارة بلا ستوب أو بستوب غير صالح عند الوسيط تُرفض بدون تغيير الستوب." : "ينتظر سعرًا داخل الهامش المحدد حول سعر الإشارة."; color:root.muted; Layout.fillWidth:true; wrapMode:Text.Wrap; elide:Text.ElideNone }
+                            LabelText { objectName:"entryModeHelp"; text:root.cfg.entry_mode === "direct" ? "ينفّذ فور وصول الإشارة بسعر السوق، ويلتزم بستوب القناة. إشارة بلا ستوب أو بستوب غير صالح عند الوسيط تُرفض بدون تغيير الستوب." : "ينتظر سعرًا داخل منطقة الدخول المكتوبة في الإشارة مع إضافة الهامش المحدد إلى طرفيها."; color:root.muted; Layout.fillWidth:true; wrapMode:Text.Wrap; elide:Text.ElideNone }
                             RowLayout { Layout.fillWidth:true; spacing:18
                                 Numeric { label:"هامش الدخول ± دولار"; settingKey:"entry_margin"; enabled:root.cfg.entry_mode !== "direct"; opacity:enabled?1:.5 }
                                 Numeric { label:root.cfg.entry_mode === "direct" ? "صلاحية الإشارة بالدقائق" : "مدة الانتظار بالدقائق"; settingKey:"wait_minutes" }
@@ -552,30 +548,30 @@ ApplicationWindow {
                 Card { Layout.fillWidth:true; implicitHeight: channelSettings.implicitHeight+40
                     ColumnLayout { id:channelSettings; anchors.left:parent.left; anchors.right:parent.right; anchors.top:parent.top; anchors.margins:20; spacing:14
                         SectionTitle { text:"القنوات ومصدر الإشارات" }
-                        LabelText { text:"القناة الأولى"; color:root.muted; Layout.fillWidth:true }
-                        ComboBox { id:channelCombo; objectName:"channelCombo"; Layout.fillWidth:true; model:root.channelOptions; textRole:"name"; currentIndex:Math.max(0,root.channelOptions.findIndex(x=>x.id===root.selectedChannelId)); onActivated:root.selectedChannelId=root.channelOptions[index].id; palette.button:"#1a242c"; palette.buttonText:"#edf1f3" }
+                        LabelText { text:"اختر قناة ثم أضفها. يمكنك إضافة أي عدد من القنوات من القائمة نفسها."; color:root.muted; wrapMode:Text.Wrap; Layout.fillWidth:true }
+                        ComboBox { id:channelCombo; objectName:"channelCombo"; Layout.fillWidth:true; model:root.channelOptions; textRole:"name"; currentIndex:Math.max(0,root.channelOptions.findIndex(x=>x.id===root.selectedChannelId)); onActivated:function(index){root.selectedChannelId=root.channelOptions[index].id}; palette.button:"#1a242c"; palette.buttonText:"#edf1f3" }
                         CheckBox { id:cancelOld; text:"إلغاء الإشارات المنتظرة من القناة التي تُزال من المراقبة"; checked:true; palette.windowText:"#d0dde5"; palette.highlight:root.green }
                         RowLayout { Layout.fillWidth:true
-                            Action { objectName:"chooseChannelButton"; text:"تثبيت القناة المختارة"; primary:true; enabled:root.channelOptions.length>0 && root.d.engine_connected; onClicked:{let ch=root.channelOptions[channelCombo.currentIndex];if(ch){root.selectedChannelId=ch.id;root.dirty=false;root.send("choose_channel",{id:ch.id,name:ch.name,settings:root.cfg,cancel_previous:cancelOld.checked})}} }
-                            LabelText { objectName:"savedChannelLabel"; text:bridge.settings.channel_name ? "القناة المثبتة: " + bridge.settings.channel_name : "لم تُحدد قناة بعد"; color:bridge.settings.channel_id ? root.green : root.muted; Layout.fillWidth:true }
+                            Action { objectName:"addChannelButton"; text:"إضافة قناة"; primary:true; enabled:root.d.engine_connected && channelCombo.currentIndex>=0 && root.channelOptions.length>0 && !root.watchedChannels.some(c=>c.id===root.channelOptions[channelCombo.currentIndex].id); onClicked:{let ch=root.channelOptions[channelCombo.currentIndex];if(ch){root.selectedChannelId=ch.id;root.dirty=false;root.send("add_channel",{id:ch.id,name:ch.name,settings:root.cfg})}} }
+                            LabelText { objectName:"savedChannelLabel"; text:"القنوات المضافة للمراقبة: " + root.watchedChannels.length; color:root.watchedChannels.length ? root.green : root.muted; Layout.fillWidth:true }
                         }
-                        LabelText { text:"القناة الثانية • اختيارية"; color:root.muted; Layout.fillWidth:true }
-                        ComboBox { id:secondChannelCombo; objectName:"secondChannelCombo"; Layout.fillWidth:true; model:root.secondChannelOptions; textRole:"name"; currentIndex:Math.max(0,root.secondChannelOptions.findIndex(x=>x.id===root.selectedSecondChannelId)); onActivated:root.selectedSecondChannelId=root.secondChannelOptions[index].id; palette.button:"#1a242c"; palette.buttonText:"#edf1f3" }
-                        RowLayout { Layout.fillWidth:true
-                            Action { objectName:"chooseSecondChannelButton"; text:"تثبيت القناة الثانية"; primary:true; enabled:!!root.cfg.channel_id && root.secondChannelOptions.length>0 && root.d.engine_connected; onClicked:{let ch=root.secondChannelOptions[secondChannelCombo.currentIndex];if(ch){root.selectedSecondChannelId=ch.id;root.dirty=false;root.send("choose_second_channel",{id:ch.id,name:ch.name,settings:root.cfg,cancel_previous:cancelOld.checked})}} }
-                            Action { objectName:"removeSecondChannelButton"; text:"إزالة الثانية"; enabled:!!bridge.settings.second_channel_id && root.d.engine_connected; onClicked:{root.dirty=false;root.send("remove_second_channel",{settings:root.cfg,cancel_previous:cancelOld.checked})} }
-                            LabelText { objectName:"savedSecondChannelLabel"; text:bridge.settings.second_channel_name ? "القناة الثانية: " + bridge.settings.second_channel_name : "لم تُضف قناة ثانية"; color:bridge.settings.second_channel_id ? root.green : root.muted; Layout.fillWidth:true }
+                        Toggle { label:"استخدام إعدادات التنفيذ نفسها لكل القنوات"; settingKey:"shared_channel_settings" }
+                        RowLayout { visible:root.watchedChannels.length>0; Layout.fillWidth:true
+                            Action { objectName:"saveChannelModeButton"; text:"حفظ طريقة إعدادات القنوات"; enabled:root.d.engine_connected; onClicked:root.saveConfig(false) }
                         }
-                        Toggle { label:"استخدام إعدادات التنفيذ نفسها للقناتين"; settingKey:"shared_channel_settings" }
-                        RowLayout { visible:!!root.cfg.second_channel_id; Layout.fillWidth:true
-                            Action { objectName:"saveChannelModeButton"; text:"حفظ طريقة إعدادات القناتين"; enabled:root.d.engine_connected; onClicked:root.saveConfig(false) }
-                            Action { objectName:"editSecondChannelButton"; text:"تعديل إعدادات القناة الثانية"; visible:!root.cfg.shared_channel_settings; enabled:root.d.engine_connected; onClicked:{root.dirty=false;root.send("edit_second_channel",{settings:root.cfg});root.page=5} }
-                        }
-                        LabelText { visible:!!root.cfg.second_channel_id && !root.cfg.shared_channel_settings; text:"لتعديل الثانية تُعرض كقناة أولى، وتظل القناتان تحت المراقبة. احفظ تغييراتها من صفحة الإعدادات."; color:root.muted; wrapMode:Text.Wrap; Layout.fillWidth:true }
                         LabelText { text:"كل إشارة و«متاحة» وأهدافها مرتبطة بقناتها. تغيير القناة لا يوقف إدارة صفقاتها المفتوحة."; color:root.muted; wrapMode:Text.Wrap; Layout.fillWidth:true }
-                        LabelText { objectName:"channelListeningLabel"; visible:!!bridge.settings.channel_id; text:root.d.channel_listening ? "مراقبة الرسائل الجديدة مفعّلة • تشمل الرسائل التي ترسلها أنت" : "المراقبة غير جاهزة لكل القنوات • " + (root.d.telegram_error || root.d.telegram || "بانتظار الاتصال"); color:root.d.channel_listening ? root.green : root.accent; Layout.fillWidth:true; wrapMode:Text.Wrap }
-                        Repeater { model:root.d.monitored_channels || []
-                            LabelText { required property var modelData; Layout.fillWidth:true; wrapMode:Text.Wrap; text:modelData.name + " • " + (modelData.ready ? "المراقبة مفعّلة" : modelData.error || "بانتظار الاتصال"); color:modelData.ready ? root.green : root.accent }
+                        LabelText { objectName:"channelListeningLabel"; visible:root.watchedChannels.length>0; text:root.d.channel_listening ? "مراقبة الرسائل الجديدة مفعّلة • تشمل الرسائل التي ترسلها أنت" : "المراقبة غير جاهزة لكل القنوات • " + (root.d.telegram_error || root.d.telegram || "بانتظار الاتصال"); color:root.d.channel_listening ? root.green : root.accent; Layout.fillWidth:true; wrapMode:Text.Wrap }
+                        Repeater { model:root.watchedChannels
+                            Card { id:watchedRow; required property var modelData; objectName:"watchedChannel_" + modelData.id; property var status:root.channelStatus(modelData.id); Layout.fillWidth:true; implicitHeight:watchedContent.implicitHeight+28
+                                ColumnLayout { id:watchedContent; anchors.left:parent.left; anchors.right:parent.right; anchors.top:parent.top; anchors.margins:14; spacing:8
+                                    RowLayout { Layout.fillWidth:true
+                                        Action { objectName:"removeChannel_" + watchedRow.modelData.id; text:"إزالة"; enabled:root.d.engine_connected; onClicked:{root.dirty=false;root.send("remove_channel",{id:watchedRow.modelData.id,settings:root.cfg,cancel_previous:cancelOld.checked})} }
+                                        Action { objectName:"editChannel_" + watchedRow.modelData.id; text:"إعدادات القناة"; visible:!root.cfg.shared_channel_settings; enabled:root.d.engine_connected; onClicked:{root.dirty=false;root.send("edit_channel",{id:watchedRow.modelData.id,settings:root.cfg});root.page=5} }
+                                        LabelText { text:watchedRow.modelData.name; font.weight:Font.DemiBold; Layout.fillWidth:true }
+                                    }
+                                    LabelText { objectName:"channelState_" + watchedRow.modelData.id; text:watchedRow.status.ready ? "● متصلة • مراقبة الرسائل مفعّلة" : "● " + (watchedRow.status.error || (root.d.engine_connected ? "بانتظار اتصال القناة" : "المحرك متوقف")); color:watchedRow.status.ready ? root.green : root.accent; wrapMode:Text.Wrap; Layout.fillWidth:true }
+                                }
+                            }
                         }
                     }
                 }

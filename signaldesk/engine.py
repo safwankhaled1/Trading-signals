@@ -32,7 +32,7 @@ class TradingEngine:
         self.history_cursor = 0
 
     def settings_for(self, channel):
-        if self.settings.shared_channel_settings and channel in {self.settings.channel_id, self.settings.second_channel_id}:
+        if self.settings.shared_channel_settings and any(c["id"] == channel for c in self.settings.monitored_channels()):
             return deepcopy(self.settings)
         profile = self.store.get(f"profile:{channel}")
         return Settings.from_dict(profile) if profile else deepcopy(self.settings)
@@ -73,7 +73,8 @@ class TradingEngine:
                 source = parse_message(row["text"])
                 if source.kind in {"entry", "repeat"} and source.entry:
                     parsed = replace(parsed, side=parsed.side or source.side, entry=source.entry,
-                                     stop=parsed.stop or source.stop, instrument=parsed.instrument or source.instrument)
+                                     stop=parsed.stop or source.stop, instrument=parsed.instrument or source.instrument,
+                                     entry_end=source.entry_end)
                     break
         if parsed.kind == "ambiguous":
             signal_id = ""
@@ -90,8 +91,9 @@ class TradingEngine:
                 else:
                     self.store.event("تعديل الرسالة محفوظ؛ متابعة التعديلات معطلة", signal_id)
                 return signal_id
-            if parsed.kind == "ignored":
-                self.store.event("رسالة غير تداولية؛ تم تجاهلها", signal_id, message_id=message_id)
+            if parsed.kind in {"ignored", "announcement"}:
+                self.store.event("رسالة تمهيدية؛ بانتظار الإشارة المفصلة بدون فتح صفقة" if parsed.kind == "announcement"
+                                 else "رسالة غير تداولية؛ تم تجاهلها", signal_id, message_id=message_id)
                 return ""
             if parsed.kind in {"targets", "manage"}:
                 managed_manuals = [s for s in self.current_signals() if s.get("manual") and s["state"] == "open" and self._manual_enabled(s)]
@@ -130,7 +132,15 @@ class TradingEngine:
             entry = expand_price(parsed.entry, anchor, inference_distance) if parsed.entry else reference["entry"] if reference else None
             if entry is None:
                 raise BrokerError("لا يوجد سعر دخول للإشارة")
-            same = reference and side == reference["side"] and abs(entry - reference["entry"]) < 1e-6
+            if parsed.entry:
+                end = expand_price(parsed.entry_end, entry, inference_distance) if parsed.entry_end else entry
+                low, high = sorted((entry, end))
+                entry = (low + high) / 2
+            else:
+                low, high = reference.get("entry_low", entry), reference.get("entry_high", entry)
+            same = (reference and side == reference["side"] and abs(entry - reference["entry"]) < 1e-6
+                    and abs(low - reference.get("entry_low", reference["entry"])) < 1e-6
+                    and abs(high - reference.get("entry_high", reference["entry"])) < 1e-6)
             root = reference["root"] if parsed.kind == "repeat" and same else ""
             if parsed.kind == "repeat" and same:
                 active = [s for s in self.current_signals() if s["root"] == root and s["state"] in {"pending", "sending", "uncertain", "open"}]
@@ -147,7 +157,7 @@ class TradingEngine:
             stop = expand_price(parsed.stop, entry, inference_distance) if parsed.stop else reference["signal_stop"] if inherit_stop else None
             signal = {"id": identifier, "root": root or identifier, "channel": channel, "channel_name": channel_name or cfg.channel_name or str(channel),
                       "message": message_id, "raw": raw, "reply": reply, "account": self.broker.identity, "symbol": self.broker.symbol,
-                      "side": side, "entry": entry, "signal_stop": stop, "created": now,
+                      "side": side, "entry": entry, "entry_low": low, "entry_high": high, "signal_stop": stop, "created": now,
                       "expires": now + cfg.wait_minutes * 60 if cfg.expiry_enabled else None,
                       "sequence": max((s.get("sequence", 0) for s in self.signals.values()), default=0) + 1,
                       "state": "pending", "config": cfg.to_dict(), "channel_targets": parsed.targets or (deepcopy(reference.get("channel_targets", [])) if parsed.kind == "repeat" and same else []),
@@ -164,7 +174,7 @@ class TradingEngine:
     def _edit(self, s, parsed, cfg):
         if s["state"] not in {"pending", "open"}:
             return
-        if parsed.kind == "targets" and cfg.targets_mode == "channel":
+        if parsed.targets and cfg.targets_mode == "channel":
             s["channel_targets"] = parsed.targets
             self._set_targets(s, Settings.from_dict(s["config"]))
         if parsed.kind in {"entry", "repeat"}:
@@ -173,7 +183,11 @@ class TradingEngine:
                 side = parsed.side or s["side"]
                 s["side"] = side
                 if parsed.entry:
-                    s["entry"] = expand_price(parsed.entry, tick["ask"] if side == "buy" else tick["bid"], cfg.max_price_inference_distance)
+                    distance = float("inf") if cfg.entry_mode == "direct" else cfg.max_price_inference_distance
+                    start = expand_price(parsed.entry, tick["ask"] if side == "buy" else tick["bid"], distance)
+                    end = expand_price(parsed.entry_end, start, distance) if parsed.entry_end else start
+                    s["entry_low"], s["entry_high"] = sorted((start, end))
+                    s["entry"] = (start + end) / 2
             if parsed.stop:
                 value = expand_price(parsed.stop, s["entry"], cfg.max_price_inference_distance)
                 if s["state"] == "open":
@@ -202,8 +216,10 @@ class TradingEngine:
         if self.paused:
             return
         price = tick["ask"] if s["side"] == "buy" else tick["bid"]
-        if cfg.entry_mode == "range" and abs(price - s["entry"]) > cfg.entry_margin + 1e-8:
-            self._entry_error(s, f"بانتظار السعر: {'ASK' if s['side'] == 'buy' else 'BID'} {price:g} خارج نطاق {s['entry'] - cfg.entry_margin:g} — {s['entry'] + cfg.entry_margin:g}")
+        low = s.get("entry_low", s["entry"]) - cfg.entry_margin
+        high = s.get("entry_high", s["entry"]) + cfg.entry_margin
+        if cfg.entry_mode == "range" and not low - 1e-8 <= price <= high + 1e-8:
+            self._entry_error(s, f"بانتظار السعر: {'ASK' if s['side'] == 'buy' else 'BID'} {price:g} خارج نطاق {low:g} — {high:g}")
             return
         stop = s["signal_stop"]
         if cfg.entry_mode == "direct":

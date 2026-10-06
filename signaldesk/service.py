@@ -204,6 +204,21 @@ class Service:
         finally:
             self.gateway.busy = False
 
+    def channel_profile(self, base, identifier, name, save_previous=True):
+        if save_previous and self.settings.channel_id:
+            previous = base.to_dict()
+            previous.update(channel_id=self.settings.channel_id, channel_name=self.settings.channel_name,
+                            watched_channels=[{"id": self.settings.channel_id, "name": self.settings.channel_name}])
+            self.store.set(f"profile:{self.settings.channel_id}", previous)
+        data = self.store.get(f"profile:{identifier}", base.to_dict())
+        # Monitoring selection and broker connection belong to the account,
+        # rather than to an archived execution profile.
+        for key in ("terminal_path", "symbol", "management_scope", "selected_tickets", "manage_manual_stops",
+                    "report_timezone", "report_utc_offset", "shared_channel_settings", "watched_channels"):
+            data[key] = getattr(base, key)
+        data.update(channel_id=identifier, channel_name=name)
+        return data
+
     async def command(self, cmd):
         action = cmd.get("action")
         if cmd.get("account_id") and cmd["account_id"] != self.store.account and action not in {"stop", "discover", "telegram_connect", "telegram_code", "telegram_login", "telegram_logout"}:
@@ -249,6 +264,12 @@ class Service:
                     for s in self.engine.current_signals():
                         if s["channel"] in removed:
                             self.engine.cancel(s["id"])
+                elif self.store.account:
+                    for signal in self.store.signals():
+                        if signal["channel"] in removed and signal["state"] == "pending":
+                            signal["state"] = "cancelled"
+                            self.store.save_signal(signal)
+                            self.store.event("أُلغيت الإشارة المنتظرة عند إزالة قناتها", signal["id"])
             self.settings = settings
             if self.engine:
                 self.engine.apply_settings(settings)
@@ -256,11 +277,11 @@ class Service:
                 self.store.set("settings", settings.to_dict())
                 if settings.channel_id:
                     self.store.set(f"profile:{settings.channel_id}", settings.to_dict())
-            if settings.second_channel_id and not self.store.get(f"profile:{settings.second_channel_id}"):
-                second = settings.to_dict()
-                second.update(channel_id=settings.second_channel_id, channel_name=settings.second_channel_name,
-                              second_channel_id=0, second_channel_name="")
-                self.store.set(f"profile:{settings.second_channel_id}", second)
+            for channel in settings.monitored_channels():
+                if not self.store.get(f"profile:{channel['id']}"):
+                    profile = settings.to_dict()
+                    profile.update(channel_id=channel["id"], channel_name=channel["name"])
+                    self.store.set(f"profile:{channel['id']}", profile)
             if reconnect:
                 self.connect_broker(symbol_override=settings.symbol)
                 settings = self.settings
@@ -269,32 +290,43 @@ class Service:
                 await self.gateway.select_channels(settings.monitored_channels())
             self.notice = "تم حفظ الإعدادات"
             self.notice_id += 1
-        elif action in {"choose_second_channel", "remove_second_channel"}:
+        elif action in {"add_channel", "remove_channel"}:
             base = Settings.from_dict(cmd.get("settings", self.settings.to_dict()))
-            identifier = int(cmd["id"]) if action == "choose_second_channel" else 0
-            base.second_channel_id = identifier
-            base.second_channel_name = cmd["name"] if identifier else ""
+            identifier = int(cmd["id"])
+            selected = base.monitored_channels()
+            if action == "add_channel":
+                if not identifier or any(c["id"] == identifier for c in selected):
+                    raise ValueError("القناة مضافة إلى المراقبة بالفعل أو غير صالحة")
+                selected.append({"id": identifier, "name": cmd["name"]})
+            else:
+                if not any(c["id"] == identifier for c in selected):
+                    raise ValueError("القناة غير موجودة في قائمة المراقبة")
+                selected = [c for c in selected if c["id"] != identifier]
+                if identifier == base.channel_id:
+                    # Preserve the removed channel's profile before selecting another editor.
+                    self.store.set(f"profile:{identifier}", base.to_dict())
+                    base.channel_id = selected[0]["id"] if selected else 0
+                    base.channel_name = selected[0]["name"] if selected else ""
+            base.watched_channels = selected
             base.validate()
-            await self.command({"action": "settings", "settings": base.to_dict(),
+            data = base.to_dict()
+            if action == "remove_channel" and not base.shared_channel_settings and selected and identifier == self.settings.channel_id:
+                data = self.channel_profile(base, base.channel_id, base.channel_name, save_previous=False)
+            await self.command({"action": "settings", "settings": data,
                                 "cancel_previous": cmd.get("cancel_previous", False)})
-        elif action in {"load_profile", "choose_channel", "edit_second_channel"}:
-            identifier = self.settings.second_channel_id if action == "edit_second_channel" else int(cmd["id"])
+        elif action in {"load_profile", "choose_channel", "edit_channel"}:
+            identifier = int(cmd["id"])
             if not identifier:
-                raise ValueError("اختر قناة ثانية أولًا")
+                raise ValueError("اختر قناة أولًا")
             base = Settings.from_dict(cmd.get("settings", self.settings.to_dict()))
-            if self.settings.channel_id:
-                previous = base.to_dict()
-                previous.update(channel_id=self.settings.channel_id, channel_name=self.settings.channel_name)
-                self.store.set(f"profile:{self.settings.channel_id}", previous)
-            data = self.store.get(f"profile:{identifier}", base.to_dict())
-            # Connection and account-management scope belong to this installation,
-            # not to an archived channel's profile.
-            for key in ("terminal_path", "symbol", "management_scope", "selected_tickets", "manage_manual_stops", "report_timezone", "report_utc_offset", "shared_channel_settings", "second_channel_id", "second_channel_name"):
-                data[key] = getattr(base, key)
-            name = self.settings.second_channel_name if action == "edit_second_channel" else cmd["name"]
-            if identifier == base.second_channel_id:
-                data.update(second_channel_id=base.channel_id, second_channel_name=base.channel_name)
-            data.update(channel_id=identifier, channel_name=name)
+            selected = next((c for c in base.monitored_channels() if c["id"] == identifier), None)
+            if action == "edit_channel" and not selected:
+                raise ValueError("أضف القناة للمراقبة قبل تعديل إعداداتها")
+            name = selected["name"] if selected else cmd["name"]
+            if not selected:
+                base.watched_channels = [c for c in base.monitored_channels() if c["id"] != base.channel_id]
+                base.watched_channels.append({"id": identifier, "name": name})
+            data = self.channel_profile(base, identifier, name)
             await self.command({"action": "settings", "settings": data, "cancel_previous": cmd.get("cancel_previous", False)})
         elif action == "pause" and self.engine:
             if not cmd["paused"] and self.mode == "live":
