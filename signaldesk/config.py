@@ -14,6 +14,7 @@ def data_directory() -> Path:
 
 @dataclass
 class Settings:
+    entry_mode: str = "range"
     entry_margin: float = 1.0
     wait_minutes: float = 10.0
     expiry_enabled: bool = True
@@ -64,7 +65,7 @@ class Settings:
             raise ValueError("مهلة الانتظار يجب أن تكون أكبر من صفر")
         if not 0 < self.risk_percent <= 100:
             raise ValueError("نسبة المخاطرة يجب أن تكون بين صفر و100")
-        enums = {"size_mode": {"fixed", "risk"}, "stop_mode": {"signal", "fixed"},
+        enums = {"entry_mode": {"range", "direct"}, "size_mode": {"fixed", "risk"}, "stop_mode": {"signal", "fixed"},
                  "targets_mode": {"manual", "channel", "none"}, "management_scope": {"app", "selected", "all"},
                  "report_timezone": {"broker", "local"}}
         for key, values in enums.items():

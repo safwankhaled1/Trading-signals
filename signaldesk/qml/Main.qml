@@ -146,6 +146,7 @@ ApplicationWindow {
         DecimalInput { objectName: "numeric_" + numericSetting.settingKey; Layout.fillWidth: true; numericValue: root.cfg[numericSetting.settingKey]; onNumberEdited: value => root.setCfg(numericSetting.settingKey, value) }
     }
     component Choice: ColumnLayout {
+        id: choiceSetting
         property string label
         property string settingKey
         property var labels: []
@@ -154,7 +155,7 @@ ApplicationWindow {
         spacing: 7
         LabelText { text: parent.label; color: root.muted; Layout.fillWidth: true }
         ComboBox {
-            id: combo; Layout.fillWidth: true; implicitHeight: 42
+            id: combo; objectName: "choice_" + choiceSetting.settingKey; Layout.fillWidth: true; implicitHeight: 42
             model: parent.labels; currentIndex: Math.max(0, parent.values.indexOf(root.cfg[parent.settingKey]))
             onActivated: root.setCfg(parent.settingKey, parent.values[index])
             palette.button: "#0d161e"; palette.buttonText: "#edf1f3"; palette.text: "#edf1f3"; palette.base: "#17242e"; palette.highlight: "#496e62"
@@ -408,11 +409,13 @@ ApplicationWindow {
                     Card { Layout.fillWidth:true; implicitHeight: entrySettings.implicitHeight+40
                         ColumnLayout { id:entrySettings; anchors.left:parent.left; anchors.right:parent.right; anchors.top:parent.top; anchors.margins:20; spacing:14
                             SectionTitle { text:"الدخول والانتظار" }
+                            Choice { label:"طريقة الدخول"; settingKey:"entry_mode"; labels:["ضمن هامش سعر الإشارة", "مباشر بسعر السوق مهما كان السعر"]; values:["range", "direct"] }
+                            LabelText { objectName:"entryModeHelp"; text:root.cfg.entry_mode === "direct" ? "ينفّذ فور وصول الإشارة بسعر السوق، ويلتزم بستوب القناة. إشارة بلا ستوب أو بستوب غير صالح عند الوسيط تُرفض بدون تغيير الستوب." : "ينتظر سعرًا داخل الهامش المحدد حول سعر الإشارة."; color:root.muted; Layout.fillWidth:true; wrapMode:Text.Wrap; elide:Text.ElideNone }
                             RowLayout { Layout.fillWidth:true; spacing:18
-                                Numeric { label:"هامش الدخول ± دولار"; settingKey:"entry_margin" }
-                                Numeric { label:"مدة الانتظار بالدقائق"; settingKey:"wait_minutes" }
+                                Numeric { label:"هامش الدخول ± دولار"; settingKey:"entry_margin"; enabled:root.cfg.entry_mode !== "direct"; opacity:enabled?1:.5 }
+                                Numeric { label:root.cfg.entry_mode === "direct" ? "صلاحية الإشارة بالدقائق" : "مدة الانتظار بالدقائق"; settingKey:"wait_minutes" }
                             }
-                            Toggle { label:"إلغاء الإشارة بعد انتهاء مدة الانتظار"; settingKey:"expiry_enabled" }
+                            Toggle { label:root.cfg.entry_mode === "direct" ? "إلغاء الإشارة بعد انتهاء صلاحيتها أثناء توقف الدخول أو انقطاع الاتصال" : "إلغاء الإشارة بعد انتهاء مدة الانتظار"; settingKey:"expiry_enabled" }
                         }
                     }
                     Card { Layout.fillWidth:true; implicitHeight: riskSettings.implicitHeight+40
@@ -426,6 +429,7 @@ ApplicationWindow {
                                 Choice { label:"طريقة الستوب"; settingKey:"stop_mode"; labels:["ستوب الإشارة مع بديل ثابت", "مسافة ثابتة دائمًا"]; values:["signal","fixed"] }
                                 Numeric { label:"المسافة الثابتة بالدولار"; settingKey:"stop_distance" }
                             }
+                            LabelText { visible:root.cfg.entry_mode === "direct"; text:"الدخول المباشر يستخدم ستوب القناة للإشارة الجديدة مهما كان اختيار الستوب أعلاه. إعدادات الستوب تبقى متاحة لإدارة الصفقات اليدوية."; color:root.accent; Layout.fillWidth:true; wrapMode:Text.Wrap; elide:Text.ElideNone }
                         }
                     }
                     Card { Layout.fillWidth:true; implicitHeight: targetSettings.implicitHeight+40
@@ -650,7 +654,7 @@ ApplicationWindow {
             Action { text:"تفعيل الدخول"; primary:true; onClicked:enableDialog.accept() }
         }
         onAccepted:root.send("pause",{paused:false})
-        Label { width:parent.width; wrapMode:Text.Wrap; text:"سيبدأ تنفيذ إشارات القناة على الحساب " + (root.d.account.login || "") + " لدى " + (root.d.account.server || "") + ".\nالقناة: " + (root.cfg.channel_name || "غير محددة") + "\nالهامش ±" + root.cfg.entry_margin + " دولار، واللوت حسب إعداداتك." }
+        Label { width:parent.width; wrapMode:Text.Wrap; text:"سيبدأ تنفيذ إشارات القناة على الحساب " + (root.d.account.login || "") + " لدى " + (root.d.account.server || "") + ".\nالقناة: " + (root.cfg.channel_name || "غير محددة") + "\n" + (root.cfg.entry_mode === "direct" ? "دخول مباشر بسعر السوق مع ستوب القناة الإلزامي" : "الهامش ±" + root.cfg.entry_margin + " دولار") + "، واللوت حسب إعداداتك." }
     }
     Dialog {
         id:modeDialog; anchors.centerIn:parent; modal:true; title:"الاتصال بـMT5"; width:490

@@ -41,6 +41,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--restart", action="store_true")
     parser.add_argument("--engine-stopped", action="store_true")
+    parser.add_argument("--page", type=int, choices=range(8), default=6)
     parser.add_argument("--allow-active-restart", action="store_true",
                         help="Only after explicit user approval of a temporary interruption to trade management")
     args = parser.parse_args()
@@ -124,7 +125,7 @@ def main():
             shutil.copytree(backup, target, dirs_exist_ok=True)
             raise
         if args.restart:
-            subprocess.Popen([str(executable), "--mode", "live", "--page", "6"] + (["--engine-stopped"] if args.engine_stopped else []), cwd=str(project),
+            subprocess.Popen([str(executable), "--mode", "live", "--page", str(args.page)] + (["--engine-stopped"] if args.engine_stopped else []), cwd=str(project),
                              creationflags=subprocess.DETACHED_PROCESS,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print("Updated the existing GoldSignalDesk-0.1.1 installation in place; data and previous entry setting preserved.")

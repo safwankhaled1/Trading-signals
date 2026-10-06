@@ -11,7 +11,7 @@ sys.path.insert(0, str(project))
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ["QT_QUICK_BACKEND"] = "software"
 
-from PySide6.QtCore import QObject, QMetaObject, Qt, QUrl, qInstallMessageHandler
+from PySide6.QtCore import QObject, QMetaObject, Qt, QUrl, Q_ARG, qInstallMessageHandler
 from PySide6.QtGui import QInputMethodEvent
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtTest import QTest
@@ -113,6 +113,20 @@ def main():
         assert bridge.client.commands.empty(), "Invalid text must not save a previous lot"
         # Switching account discards the focused draft and restores that account's settings.
         type_value("fixed_lot", "0.04")
+        mode = window.findChild(QObject, "choice_entry_mode")
+        assert mode.property("currentIndex") == 0 and field("entry_margin").property("enabled")
+        mode.setProperty("currentIndex", 1)
+        QMetaObject.invokeMethod(mode, "activated", Q_ARG(int, 1))
+        app.processEvents()
+        assert save()["settings"]["entry_mode"] == "direct"
+        assert not field("entry_margin").property("enabled")
+        assert "ستوب القناة" in window.findChild(QObject, "entryModeHelp").property("text")
+        mode.setProperty("currentIndex", 0)
+        QMetaObject.invokeMethod(mode, "activated", Q_ARG(int, 0))
+        app.processEvents()
+        assert save()["settings"]["entry_mode"] == "range"
+        assert field("entry_margin").property("enabled")
+        type_value("fixed_lot", "0.04")
         other = json.loads(json.dumps(sample))
         other["account_id"] = "other-numeric-test"
         other["settings"]["fixed_lot"] = .07
@@ -123,7 +137,7 @@ def main():
         serious = [w for w in warnings if any(word in w for word in
                    ("ReferenceError", "TypeError", "Cannot assign", "Unable to assign", "Binding loop"))]
         assert not serious, serious
-        print("Numeric input passed: decimal keystrokes and snapshots, focused save, restore, comma and Arabic decimals, invalid-text rejection, account switch; no broker commands.")
+        print("Settings input passed: decimal keystrokes and snapshots, focused save, restore, Arabic decimals, invalid text, direct/range selection and margin enablement, account switch; no broker commands.")
     finally:
         bridge.client = None
         window.close()

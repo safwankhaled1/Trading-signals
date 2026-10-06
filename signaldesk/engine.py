@@ -60,6 +60,7 @@ class TradingEngine:
         if reference and reference not in self.current_signals():
             reference = None
         signal_id = reference["id"] if reference else ""
+        context_repeat = parsed.kind == "repeat" and not parsed.entry
         if parsed.kind == "repeat" and not parsed.entry and not edited:
             # A fresh availability message refers to its original entry text, even if an
             # older parser failed to understand that entry. Never replay the original post.
@@ -122,7 +123,9 @@ class TradingEngine:
             if not side:
                 raise BrokerError("لا توجد إشارة سابقة لتحديد اتجاه إعادة الدخول")
             quote = tick["ask"] if side == "buy" else tick["bid"]
-            entry = expand_price(parsed.entry, quote, cfg.max_price_inference_distance) if parsed.entry else reference["entry"] if reference else None
+            inference_distance = float("inf") if cfg.entry_mode == "direct" else cfg.max_price_inference_distance
+            anchor = reference["entry"] if cfg.entry_mode == "direct" and context_repeat and reference else quote
+            entry = expand_price(parsed.entry, anchor, inference_distance) if parsed.entry else reference["entry"] if reference else None
             if entry is None:
                 raise BrokerError("لا يوجد سعر دخول للإشارة")
             same = reference and side == reference["side"] and abs(entry - reference["entry"]) < 1e-6
@@ -138,7 +141,8 @@ class TradingEngine:
             if parsed.kind == "repeat" and not parsed.entry and not reference:
                 raise BrokerError("إعادة دخول بدون إشارة مرتبطة")
             identifier = hashlib.sha256(f"{self.broker.identity}:{channel}:{message_id}".encode()).hexdigest()[:16]
-            stop = expand_price(parsed.stop, entry, cfg.max_price_inference_distance) if parsed.stop else reference["signal_stop"] if same else None
+            inherit_stop = same and (cfg.entry_mode != "direct" or parsed.kind == "repeat")
+            stop = expand_price(parsed.stop, entry, inference_distance) if parsed.stop else reference["signal_stop"] if inherit_stop else None
             signal = {"id": identifier, "root": root or identifier, "channel": channel, "channel_name": channel_name or cfg.channel_name or str(channel),
                       "message": message_id, "raw": raw, "reply": reply, "account": self.broker.identity, "symbol": self.broker.symbol,
                       "side": side, "entry": entry, "signal_stop": stop, "created": now,
@@ -196,11 +200,21 @@ class TradingEngine:
         if self.paused:
             return
         price = tick["ask"] if s["side"] == "buy" else tick["bid"]
-        if abs(price - s["entry"]) > cfg.entry_margin + 1e-8:
+        if cfg.entry_mode == "range" and abs(price - s["entry"]) > cfg.entry_margin + 1e-8:
             self._entry_error(s, f"بانتظار السعر: {'ASK' if s['side'] == 'buy' else 'BID'} {price:g} خارج نطاق {s['entry'] - cfg.entry_margin:g} — {s['entry'] + cfg.entry_margin:g}")
             return
         stop = s["signal_stop"]
-        if cfg.stop_mode == "fixed" or not stop or not valid_stop(s["side"], stop, tick["bid"], tick["ask"], self.stop_minimum()):
+        if cfg.entry_mode == "direct":
+            if not stop:
+                s["state"] = "rejected"
+                self._entry_error(s, "لم يُنفّذ الدخول المباشر: الإشارة لا تحتوي ستوب قناة")
+                return
+            stop = round(stop, self.broker.info["digits"])
+            if not valid_stop(s["side"], stop, tick["bid"], tick["ask"], self.stop_minimum()):
+                s["state"] = "rejected"
+                self._entry_error(s, f"لم يُنفّذ الدخول المباشر: ستوب القناة {stop:g} غير صالح للسعر الحالي أو مسافة الوسيط؛ لم يُستبدل بستوب ثابت")
+                return
+        elif cfg.stop_mode == "fixed" or not stop or not valid_stop(s["side"], stop, tick["bid"], tick["ask"], self.stop_minimum()):
             stop = price - cfg.stop_distance if s["side"] == "buy" else price + cfg.stop_distance
         stop = round(stop, self.broker.info["digits"])
         if not valid_stop(s["side"], stop, tick["bid"], tick["ask"], self.stop_minimum()):

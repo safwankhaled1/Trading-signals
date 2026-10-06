@@ -104,9 +104,24 @@ def main():
         request("demo_signal", text="متاحه مجددا 🔥", reply=latest["message"])
         final = wait_for(lambda s:any("لم يتم التكرار" in e["message"] for e in s["events"]))
         assert sum(t["state"] == "open" for t in final["signals"]) == 1
+        # The optional direct mode bypasses the margin and keeps the exact channel SL.
+        request("demo_price", price=4150)
+        closed = wait_for(lambda s:all(t["state"] != "open" for t in s["signals"]))
+        direct_cfg = {**closed["settings"], "entry_mode":"direct", "fixed_lot":.04}
+        request("settings", settings=direct_cfg)
+        wait_for(lambda s:s["settings"].get("entry_mode") == "direct")
+        request("demo_price", price=4117.1)
+        wait_for(lambda s:s.get("tick",{}).get("bid") == 4117.1)
+        request("demo_signal", text="اشتري ذهب الان من 15\n\nستوب 14.5")
+        direct = wait_for(lambda s:any(t["state"] == "open" and t["entry"] == 4115 for t in s["signals"]))
+        direct_trade = next(t for t in direct["signals"] if t["state"] == "open")
+        assert direct_trade["fill"] == 4117.3 and direct_trade["sl"] == 4114.5 and direct_trade["volume"] == .04
+        request("demo_signal", text="شراء 4115")
+        rejected = wait_for(lambda s:any(t["state"] == "rejected" and "ستوب قناة" in t.get("last_error","") for t in s["signals"]))
+        assert sum(t["state"] == "open" for t in rejected["signals"]) == 1
         request("stop")
         process.wait(timeout=10)
-        print("Service smoke passed: version, channel switch/confirmation/persistence, startup, IPC, execution, partial close, breakeven, UI detach, restart.")
+        print("Service smoke passed: version, channel persistence, IPC, execution, partial close, breakeven, restart, direct entry with channel SL and missing-SL rejection.")
     finally:
         if connection:
             connection.close()
