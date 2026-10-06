@@ -91,6 +91,17 @@ def test_price_wait_restart_and_availability_keep_original_range(desk):
     assert (restored.signals[second]["entry_low"], restored.signals[second]["entry_high"]) == (4151,4153)
 
 
+def test_availability_recovers_targets_of_range_rejected_by_old_parser(desk):
+    engine, broker, store = desk
+    broker.set_price(4152)
+    raw = "GOLD ❇️BUY❇️@ 📝 4153 - 4151\nTP1 🔼 4166\nTP2 🔼 4180\nTP3 🔼 4190\nSL 👀 4144"
+    store.save_message(-1001, 1, raw, None, "", engine.clock())
+    identifier = engine.receive(-1001, 2, "متاحة", reply=1)
+    trade = engine.signals[identifier]
+    assert trade["state"] == "open" and trade["sl"] == 4144
+    assert (trade["entry_low"],trade["entry_high"],trade["channel_targets"],trade["tp"]) == (4151,4153,[4166,4180,4190],4190)
+
+
 def test_sell_range_and_direct_range_keep_channel_stop(desk):
     engine, broker, _ = desk
     broker.set_price(4167.8)

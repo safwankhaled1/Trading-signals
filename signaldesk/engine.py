@@ -74,7 +74,7 @@ class TradingEngine:
                 if source.kind in {"entry", "repeat"} and source.entry:
                     parsed = replace(parsed, side=parsed.side or source.side, entry=source.entry,
                                      stop=parsed.stop or source.stop, instrument=parsed.instrument or source.instrument,
-                                     entry_end=source.entry_end)
+                                     entry_end=source.entry_end, targets=parsed.targets or source.targets)
                     break
         if parsed.kind == "ambiguous":
             signal_id = ""
