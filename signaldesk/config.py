@@ -40,6 +40,9 @@ class Settings:
     symbol: str = ""
     channel_id: int = 0
     channel_name: str = ""
+    second_channel_id: int = 0
+    second_channel_name: str = ""
+    shared_channel_settings: bool = True
     pip_size: float = 0.10
     report_utc_offset: float = 0.0
     report_timezone: str = "broker"
@@ -85,9 +88,19 @@ class Settings:
         if self.breakeven_stage < 1:
             raise ValueError("مرحلة التأمين تبدأ من 1")
         self.selected_tickets = [int(t) for t in self.selected_tickets]
+        self.channel_id = int(self.channel_id)
+        self.second_channel_id = int(self.second_channel_id)
+        if self.second_channel_id and not self.channel_id:
+            raise ValueError("اختر القناة الأولى قبل إضافة قناة ثانية")
+        if self.second_channel_id and self.second_channel_id == self.channel_id:
+            raise ValueError("القناة الثانية يجب أن تختلف عن القناة الأولى")
         self.report_utc_offset = float(self.report_utc_offset)
         if not math.isfinite(self.report_utc_offset) or not -14 <= self.report_utc_offset <= 14:
             raise ValueError("فرق توقيت الوسيط يجب أن يكون بين -14 و14 ساعة")
 
     def to_dict(self):
         return asdict(self)
+
+    def monitored_channels(self):
+        return [{"id": identifier, "name": name} for identifier, name in (
+            (self.channel_id, self.channel_name), (self.second_channel_id, self.second_channel_name)) if identifier]

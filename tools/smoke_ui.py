@@ -49,8 +49,9 @@ def main():
     sample["settings"]["channel_id"] = -1001001
     sample["settings"]["channel_name"] = "القناة الأولى"
     sample["connected"] = False
-    from signaldesk import __version__
+    from signaldesk import __version__, ENGINE_PROTOCOL
     sample["version"] = __version__
+    sample["engine_protocol"] = ENGINE_PROTOCOL
     bridge.update(json.loads(json.dumps(sample)))
     window.setProperty("page", 6)
     app.processEvents()
@@ -102,6 +103,19 @@ def main():
     bridge.update(json.loads(json.dumps(sample)))
     app.processEvents()
     assert "القناة الثانية" in label.property("text")
+    second_combo = window.findChild(QObject, "secondChannelCombo")
+    assert second_combo.property("count") == 1
+    QMetaObject.invokeMethod(window.findChild(QObject, "chooseSecondChannelButton"), "clicked")
+    command = bridge.client.commands.get_nowait()
+    assert command["action"] == "choose_second_channel" and command["id"] == -1001001
+    sample["settings"].update(second_channel_id=-1001001, second_channel_name="القناة الأولى", shared_channel_settings=True)
+    sample["monitored_channels"] = [{"id": -1001002, "name": "القناة الثانية", "ready": True, "error": ""},
+                                    {"id": -1001001, "name": "القناة الأولى", "ready": True, "error": ""}]
+    bridge.update(json.loads(json.dumps(sample)))
+    app.processEvents()
+    assert "القناة الأولى" in window.findChild(QObject, "savedSecondChannelLabel").property("text")
+    QMetaObject.invokeMethod(window.findChild(QObject, "removeSecondChannelButton"), "clicked")
+    assert bridge.client.commands.get_nowait()["action"] == "remove_second_channel"
     sample.update(mode="live", connected=True, quote_ready=False, quote_error="سعر الرمز قديم؛ بانتظار تحديث من الوسيط",
                   account={"login": 123, "trade_allowed": True, "hedging": True}, paused=True,
                   telegram="متصل", telegram_connected=True, channel_listening=True)
@@ -132,7 +146,7 @@ def main():
     different.update(account_id="test:222", connected=True, quote_ready=True, symbol="EURUSD",
                      account={"login":222,"server":"test","hedging":True,"trade_allowed":True},
                      signals=[], events=[], report={}, mt5_error="", quote_error="")
-    different["settings"].update(symbol="EURUSD", channel_id=-1001001, channel_name="القناة الأولى")
+    different["settings"].update(symbol="EURUSD", channel_id=-1001001, channel_name="القناة الأولى", second_channel_id=0, second_channel_name="")
     bridge.update(different)
     app.processEvents()
     assert not window.property("dirty") and window.property("symbolSearch") == ""
@@ -147,6 +161,7 @@ def main():
     bridge.update({"engine_connected":False})
     app.processEvents()
     assert not bridge.data["connected"] and bridge.data["report"] == {} and bridge.data["signals"] == []
+    assert bridge.data["monitored_channels"] == []
     assert "BTC" not in dashboard.findChild(QObject, "connectedSymbolLabel").property("text")
     bridge.update({"engine_connected":False, "engine_state":"stopping"})
     app.processEvents()
@@ -158,7 +173,7 @@ def main():
     connections_page = window.findChild(QObject, "pageLoader").property("item")
     assert connections_page.findChild(QObject, "startEngineButton").property("visible")
     assert not connections_page.findChild(QObject, "stopEngineButton").property("enabled")
-    sample.update(mode="demo", connected=True, mt5_error="", quote_error="", telegram_error="", telegram_connected=True)
+    sample.update(mode="demo", connected=True, mt5_error="", quote_error="", telegram_error="", telegram_connected=True, channel_listening=True)
     bridge.update(json.loads(json.dumps(sample)))
     bridge.client = None
     for page in range(8):

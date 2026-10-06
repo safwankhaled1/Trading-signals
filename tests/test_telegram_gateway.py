@@ -160,3 +160,135 @@ def test_late_channel_response_cannot_reenable_previous_channel(tmp_path):
         assert gateway.baseline_ready
 
     asyncio.run(run())
+
+
+def test_two_channels_keep_independent_floors_names_and_edits(tmp_path):
+    received = []
+    gateway = TelegramGateway(tmp_path, lambda *args: received.append(args), lambda _: None)
+    gateway.authorized = True
+
+    class Client:
+        async def get_messages(self, entity, limit):
+            return [SimpleNamespace(id=900 if entity == -1001 else 100)]
+
+    gateway.client = Client()
+
+    async def run():
+        await gateway.select_channels([{"id": -1001, "name": "A"}, {"id": -1002, "name": "B"}])
+        for channel, mid in [(-1001, 900), (-1002, 100), (-1002, 101), (-1001, 901), (-1002, 101), (-1003, 902)]:
+            await gateway._new_message(event(mid, channel=channel))
+        await gateway._edited_message(event(101, channel=-1002))
+        assert [(a[0], a[1], a[4], a[6]) for a in received] == [
+            (-1002, 101, False, "B"), (-1001, 901, False, "A"), (-1002, 101, True, "B")]
+        assert gateway.baseline_ready
+
+    asyncio.run(run())
+
+
+def test_adding_or_removing_second_channel_keeps_first_receiving(tmp_path):
+    received = []
+    gateway = TelegramGateway(tmp_path, lambda *args: received.append(args), lambda _: None)
+    gateway.client = ChannelClient()
+    gateway.authorized = True
+
+    async def run():
+        await gateway.select_channels([{"id": -1001, "name": "A"}])
+        await gateway._new_message(event(101))
+        gateway.client.latest = 200
+        await gateway.select_channels([{"id": -1001, "name": "A"}, {"id": -1002, "name": "B"}])
+        assert gateway.client.entities == [-1001, -1002]
+        await gateway._new_message(event(102))
+        await gateway._new_message(event(200, channel=-1002))
+        await gateway._new_message(event(201, channel=-1002))
+        await gateway.select_channels([{"id": -1001, "name": "A"}])
+        await gateway._new_message(event(202, channel=-1002))
+        await gateway._new_message(event(103))
+        assert [(a[0], a[1]) for a in received] == [(-1001, 101), (-1001, 102), (-1002, 201), (-1001, 103)]
+
+    asyncio.run(run())
+
+
+def test_second_channel_failure_does_not_stop_first_and_retry_does_not_skip_first(tmp_path):
+    received = []
+    gateway = TelegramGateway(tmp_path, lambda *args: received.append(args), lambda _: None)
+    gateway.authorized = True
+    failed = True
+
+    class Client:
+        async def get_messages(self, entity, limit):
+            if entity == -1002 and failed:
+                raise ValueError("inaccessible")
+            return [SimpleNamespace(id=100)]
+
+    gateway.client = Client()
+
+    async def run():
+        nonlocal failed
+        channels = [{"id": -1001, "name": "A"}, {"id": -1002, "name": "B"}]
+        with pytest.raises(ValueError, match="B.*inaccessible"):
+            await gateway.select_channels(channels)
+        await gateway._new_message(event(101))
+        await gateway._new_message(event(101, channel=-1002))
+        assert [(a[0], a[1]) for a in received] == [(-1001, 101)]
+        failed = False
+        await gateway.select_channels(channels)
+        await gateway._new_message(event(101))
+        await gateway._new_message(event(101, channel=-1002))
+        assert [(a[0], a[1]) for a in received] == [(-1001, 101), (-1002, 101)]
+        assert gateway.baseline_ready and not gateway.error
+
+    asyncio.run(run())
+
+
+def test_removed_channel_cannot_return_from_inflight_baseline(tmp_path):
+    gateway = TelegramGateway(tmp_path, lambda *args: None, lambda _: None)
+    gateway.authorized = True
+
+    async def run():
+        delayed = asyncio.Future()
+
+        class Client:
+            async def get_messages(self, entity, limit):
+                return await delayed if entity == -1002 else [SimpleNamespace(id=100)]
+
+        gateway.client = Client()
+        first = [{"id": -1001, "name": "A"}]
+        await gateway.select_channels(first)
+        task = asyncio.create_task(gateway.select_channels(first + [{"id": -1002, "name": "B"}]))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await gateway.select_channels(first)
+        delayed.set_result([SimpleNamespace(id=200)])
+        await task
+        assert gateway.channel_selection() == first and gateway.baseline_ready
+
+    asyncio.run(run())
+
+
+def test_overlapping_syncs_share_baseline_request_without_resetting_new_messages(tmp_path):
+    received = []
+    gateway = TelegramGateway(tmp_path, lambda *args: received.append(args), lambda _: None)
+    gateway.authorized = True
+
+    async def run():
+        pending = asyncio.Future()
+        calls = []
+
+        class Client:
+            async def get_messages(self, entity, limit):
+                calls.append(entity)
+                return await pending
+
+        gateway.client = Client()
+        channels = [{"id": -1001, "name": "A"}]
+        first = asyncio.create_task(gateway.select_channels(channels))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(gateway.select_channels(channels))
+        await asyncio.sleep(0)
+        pending.set_result([SimpleNamespace(id=100)])
+        await asyncio.gather(first, second)
+        await gateway._new_message(event(101))
+        assert calls == [-1001] and len(received) == 1
+        assert gateway.message_floor == 101
+
+    asyncio.run(run())

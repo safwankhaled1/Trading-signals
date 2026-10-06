@@ -27,6 +27,8 @@ ApplicationWindow {
     property string symbolSearch: ""
     property var filteredSymbols: symbolOptions.filter(s => !symbolSearch.trim() || (s.name + " " + (s.description || "")).toLowerCase().includes(symbolSearch.trim().toLowerCase()))
     property double selectedChannelId: cfg.channel_id || 0
+    property double selectedSecondChannelId: cfg.second_channel_id || 0
+    property var secondChannelOptions: channelOptions.filter(c => c.id !== cfg.channel_id)
     property string accountContext: ""
     property string message: ""
     property color accent: "#c9ac70"
@@ -49,6 +51,7 @@ ApplicationWindow {
     function currentSignals(state) { return (d.signals || []).filter(s => !state || s.state === state) }
     function realized() { return (d.signals || []).reduce((sum,s) => sum + (s.realized || 0), 0) }
     function floating() { return currentSignals("open").reduce((sum,s) => sum + (s.profit || 0), 0) }
+    function channelNames() { let s=bridge.settings; return [s.channel_name, s.second_channel_name].filter(n=>!!n).join(" • ") }
     function saveConfig(cancelPrevious) {
         bridge.saveSettings(JSON.stringify({settings:cfg, cancel_previous:cancelPrevious || false})); dirty = false
     }
@@ -74,6 +77,7 @@ ApplicationWindow {
                 root.dirty = false
                 root.cfg = JSON.parse(JSON.stringify(bridge.settings))
                 root.selectedChannelId = root.cfg.channel_id || 0
+                root.selectedSecondChannelId = root.cfg.second_channel_id || 0
                 root.symbolSearch = ""
             }
             root.updateConnectionModels()
@@ -84,6 +88,7 @@ ApplicationWindow {
                 if (next.channel_id !== root.cfg.channel_id) {
                     root.selectedChannelId = next.channel_id
                 }
+                if (next.second_channel_id !== root.cfg.second_channel_id) root.selectedSecondChannelId = next.second_channel_id || 0
                 root.cfg = next
             }
         }
@@ -241,7 +246,7 @@ ApplicationWindow {
             Item { Layout.fillWidth: true }
             ColumnLayout {
                 LabelText { text: root.titles[root.page]; font.pixelSize: 29; font.weight: Font.DemiBold; Layout.alignment: Qt.AlignRight }
-                LabelText { text: root.d.settings && root.d.settings.channel_name ? root.d.settings.channel_name : "متابعة الإشارات وتنفيذها وإدارة نتائجها"; color: root.muted; font.pixelSize: 12; Layout.alignment: Qt.AlignRight }
+                LabelText { text: root.channelNames() || "متابعة الإشارات وتنفيذها وإدارة نتائجها"; color: root.muted; font.pixelSize: 12; Layout.alignment: Qt.AlignRight }
             }
         }
         Rectangle { Layout.fillWidth: true; height: 1; color: "#243039" }
@@ -404,6 +409,7 @@ ApplicationWindow {
                 Action { text:"استعادة المحفوظ"; onClicked:{root.cfg=JSON.parse(JSON.stringify(bridge.settings)); root.dirty=false; pageLoader.active=false; pageLoader.active=true} }
                 LabelText { text:root.dirty ? "تغييرات غير محفوظة" : "الإعدادات المحفوظة للإشارات الجديدة"; color:root.dirty ? root.accent : root.muted; Layout.fillWidth:true }
             }
+            LabelText { visible:!!root.cfg.second_channel_id; text:root.cfg.shared_channel_settings ? "هذه إعدادات التنفيذ المشتركة للقناتين" : "تعديل إعدادات القناة: " + root.cfg.channel_name + " • إعدادات القناة الثانية محفوظة بشكل مستقل"; color:root.accent; Layout.fillWidth:true; wrapMode:Text.Wrap }
             ScrollView { Layout.fillWidth:true; Layout.fillHeight:true; clip:true; contentWidth:availableWidth
                 ColumnLayout { width:parent.width; spacing:18
                     Card { Layout.fillWidth:true; implicitHeight: entrySettings.implicitHeight+40
@@ -545,14 +551,32 @@ ApplicationWindow {
                 }
                 Card { Layout.fillWidth:true; implicitHeight: channelSettings.implicitHeight+40
                     ColumnLayout { id:channelSettings; anchors.left:parent.left; anchors.right:parent.right; anchors.top:parent.top; anchors.margins:20; spacing:14
-                        SectionTitle { text:"القناة ومصدر الإشارات" }
+                        SectionTitle { text:"القنوات ومصدر الإشارات" }
+                        LabelText { text:"القناة الأولى"; color:root.muted; Layout.fillWidth:true }
                         ComboBox { id:channelCombo; objectName:"channelCombo"; Layout.fillWidth:true; model:root.channelOptions; textRole:"name"; currentIndex:Math.max(0,root.channelOptions.findIndex(x=>x.id===root.selectedChannelId)); onActivated:root.selectedChannelId=root.channelOptions[index].id; palette.button:"#1a242c"; palette.buttonText:"#edf1f3" }
-                        CheckBox { id:cancelOld; text:"إلغاء الإشارات المنتظرة من القناة السابقة عند التغيير"; checked:true; palette.windowText:"#d0dde5"; palette.highlight:root.green }
+                        CheckBox { id:cancelOld; text:"إلغاء الإشارات المنتظرة من القناة التي تُزال من المراقبة"; checked:true; palette.windowText:"#d0dde5"; palette.highlight:root.green }
                         RowLayout { Layout.fillWidth:true
                             Action { objectName:"chooseChannelButton"; text:"تثبيت القناة المختارة"; primary:true; enabled:root.channelOptions.length>0 && root.d.engine_connected; onClicked:{let ch=root.channelOptions[channelCombo.currentIndex];if(ch){root.selectedChannelId=ch.id;root.dirty=false;root.send("choose_channel",{id:ch.id,name:ch.name,settings:root.cfg,cancel_previous:cancelOld.checked})}} }
                             LabelText { objectName:"savedChannelLabel"; text:bridge.settings.channel_name ? "القناة المثبتة: " + bridge.settings.channel_name : "لم تُحدد قناة بعد"; color:bridge.settings.channel_id ? root.green : root.muted; Layout.fillWidth:true }
                         }
-                        LabelText { objectName:"channelListeningLabel"; visible:!!bridge.settings.channel_id; text:root.d.channel_listening ? "مراقبة الرسائل الجديدة مفعّلة • تشمل الرسائل التي ترسلها أنت" : "مراقبة القناة غير جاهزة • " + (root.d.telegram_error || root.d.telegram || "بانتظار الاتصال"); color:root.d.channel_listening ? root.green : root.accent; Layout.fillWidth:true }
+                        LabelText { text:"القناة الثانية • اختيارية"; color:root.muted; Layout.fillWidth:true }
+                        ComboBox { id:secondChannelCombo; objectName:"secondChannelCombo"; Layout.fillWidth:true; model:root.secondChannelOptions; textRole:"name"; currentIndex:Math.max(0,root.secondChannelOptions.findIndex(x=>x.id===root.selectedSecondChannelId)); onActivated:root.selectedSecondChannelId=root.secondChannelOptions[index].id; palette.button:"#1a242c"; palette.buttonText:"#edf1f3" }
+                        RowLayout { Layout.fillWidth:true
+                            Action { objectName:"chooseSecondChannelButton"; text:"تثبيت القناة الثانية"; primary:true; enabled:!!root.cfg.channel_id && root.secondChannelOptions.length>0 && root.d.engine_connected; onClicked:{let ch=root.secondChannelOptions[secondChannelCombo.currentIndex];if(ch){root.selectedSecondChannelId=ch.id;root.dirty=false;root.send("choose_second_channel",{id:ch.id,name:ch.name,settings:root.cfg,cancel_previous:cancelOld.checked})}} }
+                            Action { objectName:"removeSecondChannelButton"; text:"إزالة الثانية"; enabled:!!bridge.settings.second_channel_id && root.d.engine_connected; onClicked:{root.dirty=false;root.send("remove_second_channel",{settings:root.cfg,cancel_previous:cancelOld.checked})} }
+                            LabelText { objectName:"savedSecondChannelLabel"; text:bridge.settings.second_channel_name ? "القناة الثانية: " + bridge.settings.second_channel_name : "لم تُضف قناة ثانية"; color:bridge.settings.second_channel_id ? root.green : root.muted; Layout.fillWidth:true }
+                        }
+                        Toggle { label:"استخدام إعدادات التنفيذ نفسها للقناتين"; settingKey:"shared_channel_settings" }
+                        RowLayout { visible:!!root.cfg.second_channel_id; Layout.fillWidth:true
+                            Action { objectName:"saveChannelModeButton"; text:"حفظ طريقة إعدادات القناتين"; enabled:root.d.engine_connected; onClicked:root.saveConfig(false) }
+                            Action { objectName:"editSecondChannelButton"; text:"تعديل إعدادات القناة الثانية"; visible:!root.cfg.shared_channel_settings; enabled:root.d.engine_connected; onClicked:{root.dirty=false;root.send("edit_second_channel",{settings:root.cfg});root.page=5} }
+                        }
+                        LabelText { visible:!!root.cfg.second_channel_id && !root.cfg.shared_channel_settings; text:"لتعديل الثانية تُعرض كقناة أولى، وتظل القناتان تحت المراقبة. احفظ تغييراتها من صفحة الإعدادات."; color:root.muted; wrapMode:Text.Wrap; Layout.fillWidth:true }
+                        LabelText { text:"كل إشارة و«متاحة» وأهدافها مرتبطة بقناتها. تغيير القناة لا يوقف إدارة صفقاتها المفتوحة."; color:root.muted; wrapMode:Text.Wrap; Layout.fillWidth:true }
+                        LabelText { objectName:"channelListeningLabel"; visible:!!bridge.settings.channel_id; text:root.d.channel_listening ? "مراقبة الرسائل الجديدة مفعّلة • تشمل الرسائل التي ترسلها أنت" : "المراقبة غير جاهزة لكل القنوات • " + (root.d.telegram_error || root.d.telegram || "بانتظار الاتصال"); color:root.d.channel_listening ? root.green : root.accent; Layout.fillWidth:true; wrapMode:Text.Wrap }
+                        Repeater { model:root.d.monitored_channels || []
+                            LabelText { required property var modelData; Layout.fillWidth:true; wrapMode:Text.Wrap; text:modelData.name + " • " + (modelData.ready ? "المراقبة مفعّلة" : modelData.error || "بانتظار الاتصال"); color:modelData.ready ? root.green : root.accent }
+                        }
                     }
                 }
                 LabelText { visible:root.d.engine_state === "stop_failed"; text:root.d.stop_error || "تعذر تأكيد إيقاف المحرك؛ أعد طلب الإيقاف"; color:"#ec9790"; wrapMode:Text.Wrap; Layout.fillWidth:true }
@@ -654,7 +678,7 @@ ApplicationWindow {
             Action { text:"تفعيل الدخول"; primary:true; onClicked:enableDialog.accept() }
         }
         onAccepted:root.send("pause",{paused:false})
-        Label { width:parent.width; wrapMode:Text.Wrap; text:"سيبدأ تنفيذ إشارات القناة على الحساب " + (root.d.account.login || "") + " لدى " + (root.d.account.server || "") + ".\nالقناة: " + (root.cfg.channel_name || "غير محددة") + "\n" + (root.cfg.entry_mode === "direct" ? "دخول مباشر بسعر السوق مع ستوب القناة الإلزامي" : "الهامش ±" + root.cfg.entry_margin + " دولار") + "، واللوت حسب إعداداتك." }
+        Label { width:parent.width; wrapMode:Text.Wrap; text:"سيبدأ تنفيذ إشارات القنوات المختارة على الحساب " + (root.d.account.login || "") + " لدى " + (root.d.account.server || "") + ".\nالقنوات: " + (root.channelNames() || "غير محددة") + "\n" + (root.cfg.shared_channel_settings ? "إعدادات تنفيذ مشتركة للقنوات" : "لكل قناة إعدادات تنفيذ مستقلة") + "\n" + (root.cfg.entry_mode === "direct" ? "دخول مباشر بسعر السوق مع ستوب القناة الإلزامي" : "الهامش ±" + root.cfg.entry_margin + " دولار") + "، واللوت حسب إعداداتك." }
     }
     Dialog {
         id:modeDialog; anchors.centerIn:parent; modal:true; title:"الاتصال بـMT5"; width:490

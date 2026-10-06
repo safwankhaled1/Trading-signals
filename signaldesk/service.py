@@ -107,7 +107,7 @@ class Service:
             if self.report_future:
                 self.report_future.cancel()
                 self.report_future = None
-            self.gateway.set_channel(self.settings.channel_id, self.settings.channel_name)
+            self.gateway.set_channels(self.settings.monitored_channels(), reset=True)
             self.channel_sync_required = True
             if self.mode == "live":
                 self.store.set("paused", True)
@@ -241,13 +241,13 @@ class Service:
             reconnect = bool(self.mode == "live" and self.broker and
                              ((settings.symbol and settings.symbol != self.broker.symbol) or
                               (settings.terminal_path and settings.terminal_path != self.broker.path)))
-            old_channel = self.settings.channel_id
-            if old_channel != settings.channel_id and cmd.get("cancel_previous", False):
-                self.deferred = [item for item in self.deferred if item[0] != old_channel]
+            removed = {c["id"] for c in self.settings.monitored_channels()} - {c["id"] for c in settings.monitored_channels()}
+            if removed and cmd.get("cancel_previous", False):
+                self.deferred = [item for item in self.deferred if item[0] not in removed]
                 self.store.set("inbox", self.deferred)
                 if self.engine:
                     for s in self.engine.current_signals():
-                        if s["channel"] == old_channel:
+                        if s["channel"] in removed:
                             self.engine.cancel(s["id"])
             self.settings = settings
             if self.engine:
@@ -256,15 +256,31 @@ class Service:
                 self.store.set("settings", settings.to_dict())
                 if settings.channel_id:
                     self.store.set(f"profile:{settings.channel_id}", settings.to_dict())
+            if settings.second_channel_id and not self.store.get(f"profile:{settings.second_channel_id}"):
+                second = settings.to_dict()
+                second.update(channel_id=settings.second_channel_id, channel_name=settings.second_channel_name,
+                              second_channel_id=0, second_channel_name="")
+                self.store.set(f"profile:{settings.second_channel_id}", second)
             if reconnect:
                 self.connect_broker(symbol_override=settings.symbol)
                 settings = self.settings
-            if settings.channel_id != self.gateway.channel_id or (settings.channel_id and self.gateway.authorized and not self.gateway.baseline_ready):
-                await self.gateway.select_channel(settings.channel_id, settings.channel_name)
+            if (settings.monitored_channels() != self.gateway.channel_selection()
+                    or (settings.channel_id and self.gateway.authorized and not self.gateway.baseline_ready)):
+                await self.gateway.select_channels(settings.monitored_channels())
             self.notice = "تم حفظ الإعدادات"
             self.notice_id += 1
-        elif action in {"load_profile", "choose_channel"}:
-            identifier = int(cmd["id"])
+        elif action in {"choose_second_channel", "remove_second_channel"}:
+            base = Settings.from_dict(cmd.get("settings", self.settings.to_dict()))
+            identifier = int(cmd["id"]) if action == "choose_second_channel" else 0
+            base.second_channel_id = identifier
+            base.second_channel_name = cmd["name"] if identifier else ""
+            base.validate()
+            await self.command({"action": "settings", "settings": base.to_dict(),
+                                "cancel_previous": cmd.get("cancel_previous", False)})
+        elif action in {"load_profile", "choose_channel", "edit_second_channel"}:
+            identifier = self.settings.second_channel_id if action == "edit_second_channel" else int(cmd["id"])
+            if not identifier:
+                raise ValueError("اختر قناة ثانية أولًا")
             base = Settings.from_dict(cmd.get("settings", self.settings.to_dict()))
             if self.settings.channel_id:
                 previous = base.to_dict()
@@ -273,9 +289,12 @@ class Service:
             data = self.store.get(f"profile:{identifier}", base.to_dict())
             # Connection and account-management scope belong to this installation,
             # not to an archived channel's profile.
-            for key in ("terminal_path", "symbol", "management_scope", "selected_tickets", "manage_manual_stops", "report_timezone", "report_utc_offset"):
+            for key in ("terminal_path", "symbol", "management_scope", "selected_tickets", "manage_manual_stops", "report_timezone", "report_utc_offset", "shared_channel_settings", "second_channel_id", "second_channel_name"):
                 data[key] = getattr(base, key)
-            data.update(channel_id=identifier, channel_name=cmd["name"])
+            name = self.settings.second_channel_name if action == "edit_second_channel" else cmd["name"]
+            if identifier == base.second_channel_id:
+                data.update(second_channel_id=base.channel_id, second_channel_name=base.channel_name)
+            data.update(channel_id=identifier, channel_name=name)
             await self.command({"action": "settings", "settings": data, "cancel_previous": cmd.get("cancel_previous", False)})
         elif action == "pause" and self.engine:
             if not cmd["paused"] and self.mode == "live":
@@ -295,11 +314,15 @@ class Service:
             self.broker.set_price(float(cmd["price"]))
         elif action == "demo_signal" and self.mode == "demo" and self.engine:
             identifier = int(time.time_ns() // 1000)
-            self.engine.receive(self.settings.channel_id or -1001, identifier, cmd["text"], cmd.get("reply"), cmd.get("edited", False), channel_name=self.settings.channel_name or "قناة المحاكاة")
+            channel = int(cmd.get("channel", self.settings.channel_id or -1001))
+            names = {c["id"]: c["name"] for c in self.settings.monitored_channels()}
+            if names and channel not in names:
+                raise ValueError("قناة المحاكاة غير مختارة للمراقبة")
+            self.engine.receive(channel, identifier, cmd["text"], cmd.get("reply"), cmd.get("edited", False), channel_name=names.get(channel, "قناة المحاكاة"))
         elif action in {"telegram_connect", "telegram_code", "telegram_login", "telegram_logout"}:
             await self.telegram_command(action, cmd)
         elif action == "sync_channel":
-            await self.gateway.select_channel(self.settings.channel_id, self.settings.channel_name)
+            await self.gateway.select_channels(self.settings.monitored_channels())
         elif action == "report":
             if not self.store.account:
                 raise ValueError("اربط حسابًا أولًا لعرض تقريره")
@@ -347,6 +370,7 @@ class Service:
         snapshot.update(telegram=tg_state, telegram_connected=tg_connected, telegram_error=tg_error,
                         telegram_busy=self.gateway.busy, mt5_state="تم الاتصال" if snapshot["connected"] else "غير متصل",
                         channel_listening=tg_connected and self.gateway.baseline_ready,
+                        monitored_channels=[{**c, "ready": tg_connected and c["ready"]} for c in self.gateway.channel_statuses()],
                         channels=self.gateway.channels, terminals=self.terminals, symbols=self.symbols, notice=self.notice, notice_id=self.notice_id,
                         heartbeat=time.time(), report_busy=bool(self.report_future and not self.report_future.done()))
         self.cache = snapshot
@@ -378,7 +402,7 @@ class Service:
         self.loop = asyncio.get_running_loop()
         self.connect_broker()
         self.listen()
-        await self.gateway.select_channel(self.settings.channel_id, self.settings.channel_name)
+        await self.gateway.select_channels(self.settings.monitored_channels())
         last_snapshot = 0
         last_error = ""
         last_archive_error = ""

@@ -32,6 +32,8 @@ class TradingEngine:
         self.history_cursor = 0
 
     def settings_for(self, channel):
+        if self.settings.shared_channel_settings and channel in {self.settings.channel_id, self.settings.second_channel_id}:
+            return deepcopy(self.settings)
         profile = self.store.get(f"profile:{channel}")
         return Settings.from_dict(profile) if profile else deepcopy(self.settings)
 

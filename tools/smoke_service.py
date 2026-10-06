@@ -58,6 +58,9 @@ def main():
             request("choose_channel", id=channel_id, name=channel_name)
             confirmed = wait_for(lambda s:s["settings"]["channel_id"] == channel_id)
             assert confirmed["settings"]["channel_name"] == channel_name
+        request("choose_second_channel", id=-1001001, name="قناة الاختبار الأولى")
+        confirmed = wait_for(lambda s:s["settings"].get("second_channel_id") == -1001001)
+        assert confirmed["settings"]["channel_id"] == -1001002
         request("demo_price", price=4164)
         wait_for(lambda s:s.get("tick", {}).get("bid") == 4164)
         request("demo_signal", text="كرر شراء ذهب الان 64\n\nستوب 63.5")
@@ -94,6 +97,7 @@ def main():
         assert restored["signals"][0]["completed"] == ["stage:0"]
         assert restored["signals"][0]["tp"] == restored["signals"][0]["targets"][-1]["price"]
         assert restored["settings"]["channel_id"] == -1001002
+        assert restored["settings"]["second_channel_id"] == -1001001
         # Exercise the omitted-instrument format from the user's actual channel.
         request("demo_price", price=4160)
         wait_for(lambda s:all(t["state"] != "open" for t in s["signals"]))
@@ -119,9 +123,13 @@ def main():
         request("demo_signal", text="شراء 4115")
         rejected = wait_for(lambda s:any(t["state"] == "rejected" and "ستوب قناة" in t.get("last_error","") for t in s["signals"]))
         assert sum(t["state"] == "open" for t in rejected["signals"]) == 1
+        request("demo_signal", channel=-1001001, text="اشتري ذهب الان من 15\n\nستوب 14.5")
+        both = wait_for(lambda s:sum(t["state"] == "open" for t in s["signals"]) == 2)
+        assert {t["channel"] for t in both["signals"] if t["state"] == "open"} == {-1001001, -1001002}
+        assert all(t["volume"] == .04 and t["sl"] == 4114.5 for t in both["signals"] if t["state"] == "open")
         request("stop")
         process.wait(timeout=10)
-        print("Service smoke passed: version, channel persistence, IPC, execution, partial close, breakeven, restart, direct entry with channel SL and missing-SL rejection.")
+        print("Service smoke passed: two-channel persistence and execution, IPC, partial close, breakeven, restart, direct entry with channel SL and missing-SL rejection.")
     finally:
         if connection:
             connection.close()

@@ -140,7 +140,7 @@ class Bridge(QObject):
     def __init__(self, mode="demo", offline=False, engine_stopped=False):
         super().__init__()
         self._data = {"mode": mode, "connected": False, "engine_connected": False, "signals": [], "events": [], "paused": True,
-                      "account": {}, "tick": {}, "telegram": "غير متصل", "channels": [], "terminals": [], "symbols": [], "report": {}, "unresolved": 0}
+                      "account": {}, "tick": {}, "telegram": "غير متصل", "channels": [], "monitored_channels": [], "terminals": [], "symbols": [], "report": {}, "unresolved": 0}
         self._settings = Settings().to_dict()
         self.notice_id = 0
         self.pending_mode = None
@@ -184,7 +184,7 @@ class Bridge(QObject):
             self.pause_target = None
             self._data.update(engine_connected=False, connected=False, quote_ready=False,
                               account={}, tick={}, signals=[], events=[], report={}, symbol="",
-                              paused=True, telegram="غير متصل", telegram_connected=False, channel_listening=False,
+                              paused=True, telegram="غير متصل", telegram_connected=False, channel_listening=False, monitored_channels=[],
                               engine_state=data.get("engine_state", "connecting"), stop_error=data.get("stop_error", ""), entry_pending=False)
             if data.get("engine_state") == "stopped":
                 self.toast.emit("تم إيقاف المحرك بالكامل؛ أوامر الستوب والهدف لدى الوسيط تبقى فعّالة")
